@@ -2,6 +2,7 @@
   "name": "deepseek-desktop",
   "version": "0.1.0",
   "description": "Electron desktop shell for dsh web (http://127.0.0.1:3080/)",
+  "repository": "https://github.com/phenix-base/deepseek-desktop",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

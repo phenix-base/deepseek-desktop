@@ -67,6 +67,13 @@
   <!-- 兜底跳转：主进程会主动 loadURL，这里作为双保险 -->
   <script>
     (function () {
+      // 主进程通过 query 传入当前状态文案（如"正在安装 deepseek-harness…"）
+      var params = new URLSearchParams(location.search);
+      var msg = params.get("msg");
+      var hint = params.get("hint");
+      if (msg) document.querySelector("h1").textContent = msg;
+      if (hint) document.querySelector(".hint").textContent = hint;
+
       var TARGET = "http://127.0.0.1:3080/";
       var interval = setInterval(function () {
         fetch(TARGET, { mode: "no-cors" })

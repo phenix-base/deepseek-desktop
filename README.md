@@ -38,11 +38,15 @@ npx electron-builder --mac --universal
 
 ## 工作原理
 
-1. 启动时检测 `http://127.0.0.1:3080/` 是否已在运行。
-2. 若已运行，直接在窗口中加载渲染该页面。
-3. 若未运行，通过 `child_process.spawn` 执行 `dsh web`，并轮询等待端口就绪。
+1. 启动时先检测 `http://127.0.0.1:3080/` 是否已在运行；若已运行，直接在窗口中加载渲染该页面。
+2. 若未运行，检测本机是否已安装 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh` CLI）：
+   - 未安装时弹窗询问用户是否安装，确认后执行 `npm install -g @deepseek-ai/dsh`。
+   - 用户选择退出则直接退出应用。
+3. dsh 可用后，通过 `child_process.spawn` 执行 `dsh web`，并轮询等待端口就绪。
 4. 等待期间显示加载页（`renderer/loading.html`），服务就绪后渲染 `http://127.0.0.1:3080/`。
 5. 退出时仅终止由本应用启动的 `dsh web` 进程，不影响外部已运行的服务。
+
+> 说明：从 Finder/Dock 启动的 GUI 应用 `PATH` 通常不含 nvm/homebrew 目录，主进程会自动追加这些常见路径以便找到 `dsh` 和 `npm`。
 
 ## 项目结构
 
