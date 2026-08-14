@@ -670,7 +670,15 @@ function createWindow() {
     saveWindowState(win);
     if (!isQuitting) {
       e.preventDefault(); // 关闭仅隐藏到托盘
-      win.hide();
+      if (win.isFullScreen()) {
+        // macOS 全屏状态下直接 hide 会留下一块黑屏的全屏 Space，必须先退出全屏再隐藏
+        win.once('leave-full-screen', () => {
+          if (!win.isDestroyed()) win.hide();
+        });
+        win.setFullScreen(false);
+      } else {
+        win.hide();
+      }
     }
   });
   // 移动/缩放时也防抖保存窗口状态，崩溃/强杀不丢位置
