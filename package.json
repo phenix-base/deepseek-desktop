@@ -1,7 +1,8 @@
 {
   "name": "deepseek-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Electron desktop shell for dsh web (http://127.0.0.1:3080/)",
+  "author": "xiaobin <xiaobin@jbinfo.cn>",
   "repository": "https://github.com/phenix-base/deepseek-desktop",
   "main": "main.js",
   "scripts": {
@@ -15,6 +16,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "preload-pet.js",
       "renderer/**",
       "assets/**"
     ],

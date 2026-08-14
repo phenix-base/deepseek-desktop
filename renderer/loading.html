@@ -58,7 +58,7 @@
       position: relative;
       text-align: center;
       user-select: none;
-      animation: fadeUp 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+      animation: fadeUp 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
     }
 
     /* ---- logo：光晕 + 涟漪 + 浮动 ---- */
@@ -190,6 +190,17 @@
     #log.visible {
       display: block;
     }
+
+    /* ---- 无障碍：系统开启「减弱动态效果」时关闭动画 ---- */
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.01s !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01s !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -236,17 +247,7 @@
           });
         }
       }
-
-      // 兜底跳转：主进程会主动 loadURL，这里作为双保险
-      var TARGET = "http://127.0.0.1:3080/";
-      var interval = setInterval(function () {
-        fetch(TARGET, { mode: "no-cors" })
-          .then(function () {
-            clearInterval(interval);
-            location.replace(TARGET);
-          })
-          .catch(function () { /* 服务未就绪，继续等待 */ });
-      }, 2000);
+      // 注：服务就绪后的跳转由主进程 loadURL 统一控制，页面不再自行轮询跳转
     })();
   </script>
 </body>

@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, dialog, Menu, Tray, nativeImage, net, screen, shell } = require('electron');
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, nativeImage, net, Notification, screen, shell, Tray } = require('electron');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -15,6 +15,8 @@ const DSH_PACKAGE = '@deepseek-ai/dsh'; // https://github.com/deepseek-ai/deepse
 const DSH_BOOT_MARKER = '__DSH_BOOT__'; // dsh web 首页内嵌的启动标记，用于识别 3080 上是否是 dsh web
 const MAX_BODY_BYTES = 8192; // 首页抓取上限（特征串校验用）
 const WINDOW_STATE_FILE = path.join(app.getPath('userData'), 'window-state.json');
+const LOG_DIR = path.join(app.getPath('userData'), 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'main.log');
 const TRAY_ICON_PATH = path.join(__dirname, 'assets', 'trayTemplate.png');
 const CREDENTIALS_FILE = path.join(os.homedir(), '.dsh', '.credentials.yaml'); // dsh 保存的 DeepSeek API Key
 const DEFAULT_WINDOW = { width: 1280, height: 800 };
@@ -34,6 +36,28 @@ let statusText = null; // 最近一次获取的 DeepSeek 服务状态（托盘�
 let trayInfoTimer = null; // 托盘信息定时刷新
 const TRAY_INFO_INTERVAL = 5 * 60 * 1000; // 余额/服务状态刷新间隔（5 分钟）
 const STATUS_PAGE_URL = 'https://status.deepseek.com/';
+const PET_STATE_FILE = path.join(app.getPath('userData'), 'pet-state.json');
+const PET_SIZE = 140; // 宠物窗口边长（正方形，透明无边框）
+const GITHUB_REPO = 'phenix-base/deepseek-desktop';
+const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
+const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases/latest`;
+const WATCHDOG_INTERVAL = 30 * 1000; // dsh web 健康检查间隔
+const ACTIVITY_INTERVAL = 15 * 1000; // 任务活动探测间隔
+const START_HIDDEN = process.argv.includes('--hidden'); // 静默启动：只驻托盘不弹窗（配合开机自启）
+
+// ---- 桌面宠物/全局状态 ----
+let petWin = null; // 宠物窗口
+let petDragOffset = null; // 宠物拖拽偏移
+let taskRunning = null; // 是否有任务进行中（null=尚未探测过）
+let serverReachable = null; // dsh web 可达性（null=尚未探测过）
+let appConnected = false; // 主窗口已进入主界面（看门狗/活动探测的前提）
+let reconnecting = false; // 看门狗自动重连进行中
+let hotkeyRegistered = false; // 全局快捷键是否已注册
+let lastBalanceLow = null; // 上次余额是否不足（通知去重用）
+let lastStatusAbnormal = null; // 上次服务状态是否异常（通知去重用）
+let updateInfo = null; // 桌面端新版本信息 { latest, url }
+let lastRendererCrash = 0; // 上次渲染进程崩溃时间
+let rendererCrashCount = 0; // 短时间内的连续崩溃次数
 
 // 从 Finder/Dock 启动时 PATH 通常不含 dsh/npm，追加常见安装位置（homebrew、nvm）
 function augmentPath() {
@@ -53,6 +77,36 @@ function augmentPath() {
   process.env.PATH = parts.join(':');
 }
 augmentPath();
+
+// 主进程日志同时写入 userData/logs/main.log（打包后无终端可看，便于排查问题）；
+// 文件超过 5MB 时清空重写，避免无限增长
+function initLogger() {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    try {
+      if (fs.statSync(LOG_FILE).size > 5 * 1024 * 1024) fs.writeFileSync(LOG_FILE, '');
+    } catch (_) {
+      /* 文件不存在则忽略 */
+    }
+    const stream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+    const format = (args) =>
+      args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+    const wrap = (orig, level) => (...args) => {
+      orig.apply(console, args);
+      try {
+        stream.write(`[${new Date().toISOString()}] [${level}] ${format(args)}\n`);
+      } catch (_) {
+        /* 写入失败忽略 */
+      }
+    };
+    console.log = wrap(console.log, 'info');
+    console.warn = wrap(console.warn, 'warn');
+    console.error = wrap(console.error, 'error');
+  } catch (_) {
+    /* 日志初始化失败不影响主流程 */
+  }
+}
+initLogger();
 
 // 单实例锁：已有实例则退出，second-instance 由已有实例聚焦窗口
 const gotTheLock = app.requestSingleInstanceLock();
@@ -74,12 +128,41 @@ if (!gotTheLock) {
     if (isQuitting) app.quit();
   });
   app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
     if (serverProc && !serverProc.killed) serverProc.kill();
   });
+  // URL Scheme：deepseek-harness://<path> → 唤起窗口并让 dsh web 处理该路径
+  // （dev 模式需显式传入可执行路径与参数）
+  if (process.platform === 'darwin') {
+    if (app.isPackaged) {
+      app.setAsDefaultProtocolClient('deepseek-harness');
+    } else {
+      app.setAsDefaultProtocolClient('deepseek-harness', process.execPath, [path.resolve(__dirname)]);
+    }
+    app.on('open-url', (event, url) => {
+      event.preventDefault();
+      handleDeepLink(url);
+    });
+  }
   app.whenReady().then(() => {
-    createWindow();
+    // dev 模式（npm start）下 Dock 显示 Electron 默认图标，替换为应用图标
+    if (process.platform === 'darwin' && !app.isPackaged) {
+      try {
+        const icon = nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png'));
+        if (!icon.isEmpty()) app.dock.setIcon(icon);
+      } catch (_) {
+        /* 图标缺失则忽略 */
+      }
+    }
+    if (!START_HIDDEN) createWindow(); // --hidden：只驻托盘（配合开机自启）
     createTray();
     startTrayInfoRefresh(); // 定时刷新托盘展示的余额与服务状态
+    registerHotkey(); // 全局快捷键唤起窗口
+    startWatchdog(); // dsh web 看门狗：挂掉自动重启
+    startActivityPolling(); // 任务活动探测（驱动宠物状态与完成通知）
+    checkAppUpdate(); // 桌面端新版本检查
+    const petState = loadPetState();
+    if (!petState || petState.visible !== false) createPet(); // 默认显示桌面宠物
   });
 }
 
@@ -147,10 +230,39 @@ async function waitDshWeb(timeout = 30000, interval = 500) {
   }
 }
 
+// 异步获取 dsh 版本号；未安装/超时返回 null（不阻塞主进程事件循环）
+function queryDshVersion(timeout = 10000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    const proc = spawn('dsh', ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    proc.stdout.on('data', (c) => {
+      out += c;
+    });
+    proc.stderr.on('data', (c) => {
+      out += c;
+    });
+    proc.once('error', () => done(null));
+    proc.once('close', (code) => done(code === 0 ? normalizeVersion(out) || null : null));
+    setTimeout(() => {
+      try {
+        proc.kill();
+      } catch (_) {
+        /* 已退出则忽略 */
+      }
+      done(null);
+    }, timeout);
+  });
+}
+
 // 检测 dsh CLI 是否已安装可用
-function isDshInstalled() {
-  const r = spawnSync('dsh', ['--version'], { encoding: 'utf8' });
-  return !r.error;
+async function isDshInstalled() {
+  return (await queryDshVersion()) !== null;
 }
 
 function escapeHtml(s) {
@@ -222,8 +334,8 @@ function installDsh(win) {
     proc.stdout.on('data', (c) => forwardLog(win, c.toString()));
     proc.stderr.on('data', (c) => forwardLog(win, c.toString()));
     proc.once('error', (err) => done(false, `无法执行 npm：${err.message}，请先安装 Node.js`));
-    proc.once('close', (code) => {
-      if (code === 0 && isDshInstalled()) {
+    proc.once('close', async (code) => {
+      if (code === 0 && (await isDshInstalled())) {
         sendStatus(win, 'deepseek-harness 安装完成');
         return done(true);
       }
@@ -234,7 +346,7 @@ function installDsh(win) {
 
 // 确认 dsh 可用；未安装则弹窗询问用户是否安装。返回 'ok' | 'quit' | 'failed'
 async function ensureDsh(win) {
-  if (isDshInstalled()) return 'ok';
+  if (await isDshInstalled()) return 'ok';
   sendStatus(win, '未检测到 dsh CLI，等待用户选择');
   const { response } = await dialog.showMessageBox(win, {
     type: 'question',
@@ -324,6 +436,271 @@ async function terminateDsh() {
   }
 }
 
+// ---- 系统通知（macOS 原生） ----
+function notify(title, body) {
+  try {
+    if (Notification.isSupported()) new Notification({ title, body }).show();
+  } catch (_) {
+    /* 通知失败不影响主流程 */
+  }
+}
+
+// ---- URL Scheme 深链：deepseek-harness://session/xxx → 主界面定位 ----
+function handleDeepLink(url) {
+  showMainWindow();
+  const p = url.replace(/^deepseek-harness:\/\//, '/').replace(/\/+/g, '/');
+  const win = mainWindow;
+  if (p.length > 1 && win && !win.isDestroyed() && win.webContents.getURL().startsWith(APP_URL)) {
+    win.loadURL(APP_URL.replace(/\/$/, '') + p).catch(() => {});
+  }
+}
+
+// ---- 全局快捷键：⌃⇧D（Ctrl+Shift+D）唤起/隐藏主窗口 ----
+function toggleMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+    mainWindow.hide();
+  } else {
+    showMainWindow();
+  }
+}
+
+function registerHotkey() {
+  if (hotkeyRegistered) return;
+  hotkeyRegistered = globalShortcut.register('CmdOrCtrl+Shift+D', toggleMainWindow);
+  if (!hotkeyRegistered) console.warn('[main] 全局快捷键注册失败（可能被其他应用占用）');
+}
+
+function toggleHotkey() {
+  if (hotkeyRegistered) {
+    globalShortcut.unregisterAll();
+    hotkeyRegistered = false;
+  } else {
+    registerHotkey();
+  }
+  buildTrayMenu();
+}
+
+// ---- 托盘「新会话」：唤出窗口并点击新会话按钮 ----
+function newSession() {
+  showMainWindow();
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  if (!win.webContents.getURL().startsWith(APP_URL)) return; // 还在加载页/错误页
+  win.webContents
+    .executeJavaScript(`(() => {
+      const btn = document.querySelector('button.hHd-Xa_newSession')
+        || Array.from(document.querySelectorAll('button')).find((b) => /新会话|New Session/i.test(b.textContent || ''));
+      if (btn) btn.click();
+    })()`)
+    .catch(() => {});
+}
+
+// ---- 桌面宠物 ----
+function loadPetState() {
+  try {
+    return JSON.parse(fs.readFileSync(PET_STATE_FILE, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function savePetPosition() {
+  if (!petWin || petWin.isDestroyed()) return;
+  try {
+    const [x, y] = petWin.getPosition();
+    fs.writeFileSync(PET_STATE_FILE, JSON.stringify({ x, y, visible: true }), 'utf8');
+  } catch (_) {
+    /* 写入失败忽略 */
+  }
+}
+
+function createPet() {
+  if (petWin && !petWin.isDestroyed()) return;
+  const saved = loadPetState();
+  const area = screen.getPrimaryDisplay().workArea;
+  const x = saved && typeof saved.x === 'number' ? saved.x : area.x + area.width - PET_SIZE - 40;
+  const y = saved && typeof saved.y === 'number' ? saved.y : area.y + area.height - PET_SIZE - 80;
+  petWin = new BrowserWindow({
+    width: PET_SIZE,
+    height: PET_SIZE,
+    x,
+    y,
+    transparent: true,
+    frame: false,
+    resizable: false,
+    hasShadow: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload-pet.js'),
+    },
+  });
+  petWin.setAlwaysOnTop(true, 'floating');
+  petWin.setVisibleOnAllWorkspaces(true, { visibleOnMenuBar: true });
+  petWin.loadFile(path.join(__dirname, 'renderer', 'pet.html'));
+  petWin.webContents.on('did-finish-load', () => sendPetState());
+  petWin.on('closed', () => {
+    petWin = null;
+  });
+}
+
+function togglePet() {
+  if (petWin && !petWin.isDestroyed()) {
+    const w = petWin;
+    petWin = null; // 先置空，避免 buildTrayMenu 读到旧状态
+    try {
+      const [x, y] = w.getPosition();
+      fs.writeFileSync(PET_STATE_FILE, JSON.stringify({ x, y, visible: false }), 'utf8');
+    } catch (_) {
+      /* 写入失败忽略 */
+    }
+    w.close();
+  } else {
+    createPet();
+  }
+  buildTrayMenu();
+}
+
+// 宠物状态感知：offline（服务不在线）> warn（余额不足/服务异常）> busy（任务进行中）> idle
+function computePetState() {
+  if (serverReachable === false) return 'offline';
+  const lowBalance = balanceValue !== null && balanceValue < BALANCE_WARN_THRESHOLD;
+  const statusBad = !!statusText && statusText !== '全部正常' && statusText !== '获取失败';
+  if (lowBalance || statusBad) return 'warn';
+  if (taskRunning) return 'busy';
+  return 'idle';
+}
+
+function sendPetState() {
+  if (petWin && !petWin.isDestroyed()) {
+    petWin.webContents.send('pet:state', computePetState());
+  }
+}
+
+// 宠物窗口 IPC：单击打开主窗口；拖拽移动（屏幕坐标换算窗口位置）
+ipcMain.on('pet:open-main', () => showMainWindow());
+ipcMain.on('pet:drag-start', (_e, pt) => {
+  if (!petWin || petWin.isDestroyed()) return;
+  const [wx, wy] = petWin.getPosition();
+  petDragOffset = { x: pt.x - wx, y: pt.y - wy };
+});
+ipcMain.on('pet:drag-move', (_e, pt) => {
+  if (!petWin || petWin.isDestroyed() || !petDragOffset) return;
+  petWin.setPosition(Math.round(pt.x - petDragOffset.x), Math.round(pt.y - petDragOffset.y));
+});
+ipcMain.on('pet:drag-end', () => {
+  petDragOffset = null;
+  savePetPosition();
+});
+
+// ---- dsh web 看门狗：进入主界面后定期健康检查，挂了自动重启并恢复窗口 ----
+function startWatchdog() {
+  setInterval(async () => {
+    if (!appConnected || isQuitting || dshTerminated || reconnecting) return;
+    const probe = await waitForServer(PORT, HOST, 3000);
+    const reachable = !!probe && probe.type === 'dsh';
+    if (serverReachable === true && !reachable) {
+      console.warn('[main] dsh web 失去响应，尝试自动重启');
+      notify('dsh web 服务中断', '正在自动重启…');
+    }
+    serverReachable = reachable;
+    sendPetState();
+    if (reachable) return;
+
+    reconnecting = true;
+    try {
+      if (serverProc && !serverProc.killed) {
+        try {
+          serverProc.kill();
+        } catch (_) {
+          /* 已退出则忽略 */
+        }
+        serverProc = null;
+      }
+      if (!mainWindow || mainWindow.isDestroyed()) {
+        showMainWindow(); // createWindow 自带「加载页 → 连接服务」流程
+        return;
+      }
+      loadLoadingPage(mainWindow, '服务中断，正在重启 dsh web…');
+      const ready = await connectToServer(mainWindow);
+      if (ready && !mainWindow.isDestroyed()) {
+        await mainWindow.loadURL(APP_URL);
+        serverReachable = true;
+        console.log('[main] dsh web 已自动恢复');
+        notify('dsh web 已恢复', '服务已自动重启并重新连接');
+        sendPetState();
+      }
+    } finally {
+      reconnecting = false;
+    }
+  }, WATCHDOG_INTERVAL);
+}
+
+// ---- 任务活动探测：读取主窗口侧栏「进行中」标识（启发式），驱动宠物 busy 状态与完成通知 ----
+function startActivityPolling() {
+  setInterval(async () => {
+    if (!appConnected || !mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.webContents.getURL().startsWith(APP_URL)) return;
+    try {
+      const running = await mainWindow.webContents.executeJavaScript(
+        `document.body.innerText.includes('进行中') || document.body.innerText.includes('In progress')`
+      );
+      setTaskRunning(!!running);
+    } catch (_) {
+      /* 页面导航中，忽略本轮 */
+    }
+  }, ACTIVITY_INTERVAL);
+}
+
+function setTaskRunning(v) {
+  if (taskRunning === null) {
+    taskRunning = v;
+    sendPetState();
+    return;
+  }
+  if (v === taskRunning) return;
+  taskRunning = v;
+  if (!v) notify('任务完成', '进行中的会话已结束');
+  sendPetState();
+}
+
+// ---- 桌面端更新检查（未签名包无法用 electron-updater 自动更新：检测新版本 + 跳转下载页）----
+async function checkAppUpdate() {
+  try {
+    const res = await net.fetch(GITHUB_LATEST_RELEASE_API, {
+      headers: { 'User-Agent': 'deepseek-desktop' },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    const latest = normalizeVersion(data.tag_name || '');
+    if (latest && latest !== normalizeVersion(app.getVersion())) {
+      updateInfo = { latest, url: data.html_url || GITHUB_RELEASES_URL };
+      console.log(`[main] 桌面端新版本：v${latest}`);
+      notify('桌面端新版本', `v${latest} 已发布，可在托盘菜单中下载`);
+      buildTrayMenu();
+    }
+  } catch (_) {
+    /* 网络失败静默 */
+  }
+}
+
+async function manualCheckUpdate() {
+  await checkAppUpdate();
+  if (updateInfo) {
+    shell.openExternal(updateInfo.url);
+  } else {
+    dialog.showMessageBox({
+      type: 'info',
+      message: '已是最新版本',
+      detail: `当前版本 v${app.getVersion()}`,
+    });
+  }
+}
+
 // 保存窗口位置/大小（关闭时写入 userData/window-state.json）
 function saveWindowState(win) {
   if (!win || win.isDestroyed() || win.isFullScreen()) return;
@@ -377,13 +754,29 @@ function createWindow() {
     width: state.width,
     height: state.height,
     title: 'DeepSeek Harness',
+    show: false, // ready-to-show 后再显示，避免先闪默认白屏
+    backgroundColor: '#050914', // 与加载页背景一致
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true, // 渲染进程沙箱化（preload 仅用 contextBridge/ipcRenderer，兼容）
       preload: path.join(__dirname, 'preload.js'),
     },
   });
   mainWindow = win;
+  win.once('ready-to-show', () => win.show());
+
+  // 外链一律交给系统浏览器打开，不在应用内弹新窗口
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+  // 渲染进程发起的导航只允许停留在本机 dsh web（loadFile/loadURL 属编程式加载，不受影响）
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith(APP_URL)) e.preventDefault();
+  });
 
   win.on('close', (e) => {
     saveWindowState(win);
@@ -392,6 +785,14 @@ function createWindow() {
       win.hide();
     }
   });
+  // 移动/缩放时也防抖保存窗口状态，崩溃/强杀不丢位置
+  let stateTimer = null;
+  const debouncedSaveState = () => {
+    clearTimeout(stateTimer);
+    stateTimer = setTimeout(() => saveWindowState(win), 500);
+  };
+  win.on('resize', debouncedSaveState);
+  win.on('move', debouncedSaveState);
 
   win.webContents.on('did-finish-load', () => {
     console.log('[main] loaded:', win.webContents.getURL());
@@ -399,18 +800,44 @@ function createWindow() {
   });
   win.webContents.on('did-fail-load', (_e, code, desc) => {
     console.error('[main] load failed:', code, desc);
+    // -3 为 ERR_ABORTED（新加载打断旧加载），属正常流程；真正的失败也要把窗口显示出来
+    if (code !== -3 && !win.isDestroyed() && !win.isVisible()) win.show();
+  });
+  // 渲染进程崩溃自愈：自动重载；10s 内连续崩溃 3 次以上则改显示错误页，避免崩溃循环
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[main] render process gone:', details.reason);
+    const now = Date.now();
+    rendererCrashCount = now - lastRendererCrash < 10000 ? rendererCrashCount + 1 : 1;
+    lastRendererCrash = now;
+    if (win.isDestroyed()) return;
+    if (rendererCrashCount <= 3) {
+      console.log('[main] 渲染进程崩溃，自动重载');
+      win.reload();
+    } else {
+      showError(win, '页面多次崩溃，请尝试重启应用');
+    }
   });
 
+  // 品牌加载页至少展示 1.2s（logo 淡入动画完整呈现）；
+  // 慢路径（需等待服务启动）下该计时与服务等待重叠，不额外拖慢启动
+  const minLoadingShow = new Promise((r) => setTimeout(r, 1200));
   loadLoadingPage(win)
     .then(async () => {
       const ready = await connectToServer(win);
+      await minLoadingShow;
       if (ready && !win.isDestroyed()) {
         console.log('[main] server ready, loading', APP_URL);
         win.loadURL(APP_URL);
+        appConnected = true; // 已进入主界面：看门狗/任务探测开始生效
+        serverReachable = true;
+        sendPetState();
         checkDshVersion(); // 异步版本检查，不阻塞启动
       }
     })
-    .catch((err) => console.error('[main] loading page error:', err));
+    .catch((err) => {
+      console.error('[main] loading page error:', err);
+      if (!win.isDestroyed() && !win.isVisible()) win.show(); // 加载页失败也要把窗口显示出来
+    });
 
   return win;
 }
@@ -446,10 +873,9 @@ function npmViewLatestVersion() {
 
 // 异步检查 dsh 版本：本地 vs npm 最新，不一致时托盘菜单出现升级项；失败静默忽略
 async function checkDshVersion() {
-  const local = spawnSync('dsh', ['--version'], { encoding: 'utf8' });
-  if (local.error) return; // dsh 不可用，跳过
-  dshLocalVersion = normalizeVersion((local.stdout || local.stderr || '').trim());
-  if (!dshLocalVersion) return;
+  const local = await queryDshVersion();
+  if (!local) return; // dsh 不可用，跳过
+  dshLocalVersion = local;
   dshLatestVersion = await npmViewLatestVersion();
   console.log(`[main] dsh 版本：本地 ${dshLocalVersion}，最新 ${dshLatestVersion || '未知'}`);
   buildTrayMenu();
@@ -535,8 +961,26 @@ async function updateBalance() {
     balanceText = `查询失败（${err.message.slice(0, 30)}）`;
   }
   console.log('[main] 余额：', balanceText);
+
+  // 余额不足的状态变化联动：系统通知 + Dock 弹跳（仅"正常→不足"切换时触发一次）
+  const low = balanceValue !== null && balanceValue < BALANCE_WARN_THRESHOLD;
+  if (low && lastBalanceLow === false) {
+    notify('账户余额不足', `剩余 ¥${balanceValue.toFixed(2)}，请及时充值`);
+    if (process.platform === 'darwin') app.dock.bounce('informational');
+  }
+  lastBalanceLow = low;
+  // Dock 图标红色角标 + 菜单栏图标旁直接显示余额（macOS）
+  if (process.platform === 'darwin') {
+    app.dock.setBadge(low ? '!' : '');
+    if (tray) {
+      const cny = (balanceText || '').match(/([\d.]+)\s*CNY/);
+      tray.setTitle(cny ? (low ? `🔴¥${cny[1]}` : `¥${cny[1]}`) : '');
+    }
+  }
+
   buildTrayMenu();
   applyBalanceWarning();
+  sendPetState();
 }
 
 // 余额低于阈值时在主界面顶部注入红色预警横幅（并同步窗口标题）；恢复后自动移除
@@ -617,7 +1061,14 @@ async function updateStatus() {
   const text = await fetchDeepseekStatus();
   statusText = text || '获取失败';
   console.log('[main] 服务状态：', statusText);
+  // 服务异常的状态变化联动：系统通知（仅"正常→异常"切换时触发一次）
+  const abnormal = !!statusText && statusText !== '全部正常' && statusText !== '获取失败';
+  if (abnormal && lastStatusAbnormal === false) {
+    notify('DeepSeek 服务异常', statusText);
+  }
+  lastStatusAbnormal = abnormal;
   buildTrayMenu();
+  sendPetState();
 }
 
 // 定时刷新托盘展示的余额与服务状态
@@ -654,6 +1105,7 @@ function buildTrayMenu() {
   if (!tray) return;
   const items = [
     { label: '打开主窗口', click: showMainWindow },
+    { label: '新会话', click: newSession },
     { type: 'separator' },
     { label: `余额：${balanceText || '查询中…'}`, enabled: false },
     {
@@ -675,7 +1127,44 @@ function buildTrayMenu() {
       click: upgradeDsh,
     });
   }
-  items.push({ type: 'separator' }, { label: '退出', click: quitApp });
+  // 桌面端自身版本：有新版本时提供下载入口，否则点击手动检查
+  if (updateInfo) {
+    items.push({
+      label: `桌面端新版本 v${updateInfo.latest}（点击下载）`,
+      click: () => shell.openExternal(updateInfo.url),
+    });
+  } else {
+    items.push({
+      label: `桌面端版本：v${app.getVersion()}（点击检查更新）`,
+      click: manualCheckUpdate,
+    });
+  }
+  items.push(
+    { type: 'separator' },
+    {
+      label: '桌面宠物',
+      type: 'checkbox',
+      checked: !!(petWin && !petWin.isDestroyed()),
+      click: togglePet,
+    },
+    {
+      label: '全局快捷键（⌃⇧D 唤起窗口）',
+      type: 'checkbox',
+      checked: hotkeyRegistered,
+      click: toggleHotkey,
+    },
+    {
+      label: '开机自启动',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item) => app.setLoginItemSettings({ openAtLogin: item.checked, args: ['--hidden'] }),
+    }
+  );
+  items.push(
+    { type: 'separator' },
+    { label: '打开日志目录', click: () => shell.openPath(LOG_DIR) },
+    { label: '退出', click: quitApp }
+  );
   trayMenu = Menu.buildFromTemplate(items);
   tray.setContextMenu(trayMenu);
 }

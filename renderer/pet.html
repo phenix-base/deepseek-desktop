@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' file: data:;" />
+  <title>DeepSeek Pet</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-user-select: none;
+      cursor: grab;
+    }
+    body:active { cursor: grabbing; }
+
+    .pet { position: relative; width: 96px; height: 96px; }
+    .pet img {
+      width: 100%;
+      height: 100%;
+      pointer-events: none; /* 让鼠标事件落在 body 上，拖拽不受图片影响 */
+    }
+
+    /* ---- idle：安静悬浮 ---- */
+    body[data-state="idle"] .pet {
+      animation: float 3s ease-in-out infinite alternate;
+      filter: drop-shadow(0 0 12px rgba(77, 107, 254, 0.45));
+    }
+
+    /* ---- busy：检测到任务进行中，快速游动 + 吐泡泡 ---- */
+    body[data-state="busy"] .pet {
+      animation: swim 0.9s ease-in-out infinite alternate;
+      filter: drop-shadow(0 0 18px rgba(96, 130, 255, 0.85));
+    }
+
+    /* ---- warn：余额不足/服务异常，红色光晕 + 不安摆动 ---- */
+    body[data-state="warn"] .pet {
+      animation: sway 2.2s ease-in-out infinite alternate;
+      filter: drop-shadow(0 0 16px rgba(255, 120, 80, 0.9)) brightness(0.92);
+    }
+
+    /* ---- offline：服务不在线，变灰打瞌睡 ---- */
+    body[data-state="offline"] .pet {
+      animation: float 5s ease-in-out infinite alternate;
+      filter: grayscale(1) opacity(0.5) drop-shadow(0 0 6px rgba(120, 120, 120, 0.3));
+    }
+    body[data-state="offline"] .pet::after {
+      content: "💤";
+      position: absolute;
+      top: -10px;
+      right: -6px;
+      font-size: 20px;
+      animation: zzz 2s ease-in-out infinite;
+    }
+
+    @keyframes float {
+      from { transform: translateY(3px); }
+      to { transform: translateY(-7px); }
+    }
+    @keyframes swim {
+      from { transform: translateY(2px) rotate(-7deg); }
+      to { transform: translateY(-6px) rotate(7deg); }
+    }
+    @keyframes sway {
+      from { transform: rotate(-9deg) translateY(1px); }
+      to { transform: rotate(9deg) translateY(-3px); }
+    }
+    @keyframes zzz {
+      0%, 100% { transform: translateY(0) scale(0.85); opacity: 0.6; }
+      50% { transform: translateY(-6px) scale(1.1); opacity: 1; }
+    }
+
+    /* ---- busy 状态的泡泡 ---- */
+    .bubble {
+      position: absolute;
+      bottom: -4px;
+      border-radius: 50%;
+      background: rgba(140, 170, 255, 0.55);
+      opacity: 0;
+      pointer-events: none;
+    }
+    .b1 { left: 18%; width: 8px; height: 8px; }
+    .b2 { left: 50%; width: 6px; height: 6px; }
+    .b3 { left: 78%; width: 5px; height: 5px; }
+    body[data-state="busy"] .b1 { animation: rise 1.6s ease-in infinite; }
+    body[data-state="busy"] .b2 { animation: rise 1.6s ease-in 0.5s infinite; }
+    body[data-state="busy"] .b3 { animation: rise 1.6s ease-in 1s infinite; }
+    @keyframes rise {
+      from { transform: translateY(0); opacity: 0.85; }
+      to { transform: translateY(-72px); opacity: 0; }
+    }
+
+    /* ---- 无障碍：系统开启「减弱动态效果」时关闭动画 ---- */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01s !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+<body data-state="idle">
+  <div class="pet">
+    <img src="../assets/deepseek-logo.svg" alt="" draggable="false" />
+    <div class="bubble b1"></div>
+    <div class="bubble b2"></div>
+    <div class="bubble b3"></div>
+  </div>
+
+  <script>
+    (function () {
+      var bridge = window.pet;
+      if (bridge && typeof bridge.onState === "function") {
+        bridge.onState(function (state) {
+          document.body.dataset.state = String(state);
+        });
+      }
+
+      // 拖拽移动；按下后位移小于 5px 视为单击 → 打开主窗口
+      var startX = 0, startY = 0, dragging = false, moved = false;
+      document.addEventListener("mousedown", function (e) {
+        dragging = true;
+        moved = false;
+        startX = e.screenX;
+        startY = e.screenY;
+        if (bridge) bridge.dragStart(e.screenX, e.screenY);
+        e.preventDefault();
+      });
+      document.addEventListener("mousemove", function (e) {
+        if (!dragging) return;
+        if (Math.abs(e.screenX - startX) + Math.abs(e.screenY - startY) > 5) moved = true;
+        if (moved && bridge) bridge.dragMove(e.screenX, e.screenY);
+      });
+      document.addEventListener("mouseup", function () {
+        if (!dragging) return;
+        dragging = false;
+        if (bridge) bridge.dragEnd();
+        if (!moved && bridge) bridge.openMain();
+      });
+    })();
+  </script>
+</body>
+</html>
