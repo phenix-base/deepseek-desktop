@@ -20,6 +20,7 @@ const CREDENTIALS_FILE = path.join(os.homedir(), '.dsh', '.credentials.yaml'); /
 const DEFAULT_WINDOW = { width: 1280, height: 800 };
 
 let serverProc = null; // 仅当由本应用启动 dsh 时非空
+let dshTerminated = false; // 退出流程中只终止一次 dsh（before-quit 拦截重入保护）
 let mainWindow = null; // 主窗口引用（关闭时隐藏到托盘）
 let isQuitting = false; // 真正退出标志：托盘「退出」/ Cmd+Q 时置 true
 let tray = null; // 系统托盘
@@ -60,8 +61,13 @@ if (!gotTheLock) {
 } else {
   app.on('second-instance', () => showMainWindow());
   app.on('activate', () => showMainWindow()); // Dock 图标点击恢复窗口
-  app.on('before-quit', () => {
+  app.on('before-quit', (e) => {
     isQuitting = true; // Cmd+Q 等系统级退出不被 close 隐藏拦截
+    if (!dshTerminated) {
+      dshTerminated = true;
+      e.preventDefault(); // 退出前先终止 dsh web，完成后再重新发起退出
+      terminateDsh().finally(() => app.quit());
+    }
   });
   app.on('window-all-closed', () => {
     // 托盘常驻：窗口关闭仅隐藏，不退出（除非 isQuitting）
@@ -281,6 +287,40 @@ async function connectToServer(win) {
   } catch (err) {
     showError(win, err.message || String(err));
     return false;
+  }
+}
+
+// 退出时终止 dsh web：
+// 1) 本应用 spawn 的 dsh 进程：SIGTERM（dsh 内部优雅退出，5s 超时后强制退出）
+// 2) 独立启动、仍在 3080 监听的 dsh web：先用 __DSH_BOOT__ 特征串确认身份，
+//    再通过 lsof 按端口找到监听进程并终止（避免误杀占用该端口的其他程序）
+async function terminateDsh() {
+  if (serverProc && !serverProc.killed) {
+    console.log(`[main] 终止本应用启动的 dsh web（pid ${serverProc.pid}）`);
+    try {
+      serverProc.kill('SIGTERM');
+    } catch (_) {
+      /* 进程已退出则忽略 */
+    }
+  }
+  const spawnedPid = serverProc ? serverProc.pid : -1;
+  const probe = await waitForServer(PORT, HOST, 1500);
+  if (!probe || probe.type !== 'dsh') return; // 3080 上已不是 dsh web（或已退出），不动它
+  try {
+    const r = spawnSync('lsof', ['-nP', `-iTCP:${PORT}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
+    for (const line of (r.stdout || '').split('\n')) {
+      const pid = parseInt(line, 10);
+      if (pid > 0 && pid !== process.pid && pid !== spawnedPid) {
+        console.log(`[main] 终止 3080 上独立运行的 dsh web（pid ${pid}）`);
+        try {
+          process.kill(pid, 'SIGTERM');
+        } catch (_) {
+          /* 进程已退出则忽略 */
+        }
+      }
+    }
+  } catch (_) {
+    /* lsof 不可用则跳过 */
   }
 }
 
