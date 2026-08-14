@@ -25,7 +25,9 @@ jobs:
         run: npm ci
 
       - name: Build dmg/zip
-        run: npm run dist
+        # --publish never：electron-builder 在 CI tag 构建时默认尝试自行发布（需要 GH_TOKEN），
+        # 这里只做构建，发布统一由下面的 action-gh-release 完成
+        run: npm run dist -- --publish never
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
