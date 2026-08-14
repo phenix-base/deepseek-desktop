@@ -16,7 +16,6 @@
     "files": [
       "main.js",
       "preload.js",
-      "preload-pet.js",
       "renderer/**",
       "assets/**"
     ],

@@ -36,8 +36,6 @@ let statusText = null; // 最近一次获取的 DeepSeek 服务状态（托盘�
 let trayInfoTimer = null; // 托盘信息定时刷新
 const TRAY_INFO_INTERVAL = 5 * 60 * 1000; // 余额/服务状态刷新间隔（5 分钟）
 const STATUS_PAGE_URL = 'https://status.deepseek.com/';
-const PET_STATE_FILE = path.join(app.getPath('userData'), 'pet-state.json');
-const PET_SIZE = 140; // 宠物窗口边长（正方形，透明无边框）
 const GITHUB_REPO = 'phenix-base/deepseek-desktop';
 const GITHUB_LATEST_RELEASE_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases/latest`;
@@ -45,9 +43,7 @@ const WATCHDOG_INTERVAL = 30 * 1000; // dsh web 健康检查间隔
 const ACTIVITY_INTERVAL = 15 * 1000; // 任务活动探测间隔
 const START_HIDDEN = process.argv.includes('--hidden'); // 静默启动：只驻托盘不弹窗（配合开机自启）
 
-// ---- 桌面宠物/全局状态 ----
-let petWin = null; // 宠物窗口
-let petDragOffset = null; // 宠物拖拽偏移
+// ---- 全局状态 ----
 let taskRunning = null; // 是否有任务进行中（null=尚未探测过）
 let serverReachable = null; // dsh web 可达性（null=尚未探测过）
 let appConnected = false; // 主窗口已进入主界面（看门狗/活动探测的前提）
@@ -159,10 +155,8 @@ if (!gotTheLock) {
     startTrayInfoRefresh(); // 定时刷新托盘展示的余额与服务状态
     registerHotkey(); // 全局快捷键唤起窗口
     startWatchdog(); // dsh web 看门狗：挂掉自动重启
-    startActivityPolling(); // 任务活动探测（驱动宠物状态与完成通知）
+    startActivityPolling(); // 任务活动探测（任务完成通知）
     checkAppUpdate(); // 桌面端新版本检查
-    const petState = loadPetState();
-    if (!petState || petState.visible !== false) createPet(); // 默认显示桌面宠物
   });
 }
 
@@ -495,108 +489,6 @@ function newSession() {
     .catch(() => {});
 }
 
-// ---- 桌面宠物 ----
-function loadPetState() {
-  try {
-    return JSON.parse(fs.readFileSync(PET_STATE_FILE, 'utf8'));
-  } catch (_) {
-    return null;
-  }
-}
-
-function savePetPosition() {
-  if (!petWin || petWin.isDestroyed()) return;
-  try {
-    const [x, y] = petWin.getPosition();
-    fs.writeFileSync(PET_STATE_FILE, JSON.stringify({ x, y, visible: true }), 'utf8');
-  } catch (_) {
-    /* 写入失败忽略 */
-  }
-}
-
-function createPet() {
-  if (petWin && !petWin.isDestroyed()) return;
-  const saved = loadPetState();
-  const area = screen.getPrimaryDisplay().workArea;
-  const x = saved && typeof saved.x === 'number' ? saved.x : area.x + area.width - PET_SIZE - 40;
-  const y = saved && typeof saved.y === 'number' ? saved.y : area.y + area.height - PET_SIZE - 80;
-  petWin = new BrowserWindow({
-    width: PET_SIZE,
-    height: PET_SIZE,
-    x,
-    y,
-    transparent: true,
-    frame: false,
-    resizable: false,
-    hasShadow: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    focusable: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      preload: path.join(__dirname, 'preload-pet.js'),
-    },
-  });
-  petWin.setAlwaysOnTop(true, 'floating');
-  petWin.setVisibleOnAllWorkspaces(true, { visibleOnMenuBar: true });
-  petWin.loadFile(path.join(__dirname, 'renderer', 'pet.html'));
-  petWin.webContents.on('did-finish-load', () => sendPetState());
-  petWin.on('closed', () => {
-    petWin = null;
-  });
-}
-
-function togglePet() {
-  if (petWin && !petWin.isDestroyed()) {
-    const w = petWin;
-    petWin = null; // 先置空，避免 buildTrayMenu 读到旧状态
-    try {
-      const [x, y] = w.getPosition();
-      fs.writeFileSync(PET_STATE_FILE, JSON.stringify({ x, y, visible: false }), 'utf8');
-    } catch (_) {
-      /* 写入失败忽略 */
-    }
-    w.close();
-  } else {
-    createPet();
-  }
-  buildTrayMenu();
-}
-
-// 宠物状态感知：offline（服务不在线）> warn（余额不足/服务异常）> busy（任务进行中）> idle
-function computePetState() {
-  if (serverReachable === false) return 'offline';
-  const lowBalance = balanceValue !== null && balanceValue < BALANCE_WARN_THRESHOLD;
-  const statusBad = !!statusText && statusText !== '全部正常' && statusText !== '获取失败';
-  if (lowBalance || statusBad) return 'warn';
-  if (taskRunning) return 'busy';
-  return 'idle';
-}
-
-function sendPetState() {
-  if (petWin && !petWin.isDestroyed()) {
-    petWin.webContents.send('pet:state', computePetState());
-  }
-}
-
-// 宠物窗口 IPC：单击打开主窗口；拖拽移动（屏幕坐标换算窗口位置）
-ipcMain.on('pet:open-main', () => showMainWindow());
-ipcMain.on('pet:drag-start', (_e, pt) => {
-  if (!petWin || petWin.isDestroyed()) return;
-  const [wx, wy] = petWin.getPosition();
-  petDragOffset = { x: pt.x - wx, y: pt.y - wy };
-});
-ipcMain.on('pet:drag-move', (_e, pt) => {
-  if (!petWin || petWin.isDestroyed() || !petDragOffset) return;
-  petWin.setPosition(Math.round(pt.x - petDragOffset.x), Math.round(pt.y - petDragOffset.y));
-});
-ipcMain.on('pet:drag-end', () => {
-  petDragOffset = null;
-  savePetPosition();
-});
-
 // ---- dsh web 看门狗：进入主界面后定期健康检查，挂了自动重启并恢复窗口 ----
 function startWatchdog() {
   setInterval(async () => {
@@ -608,7 +500,6 @@ function startWatchdog() {
       notify('dsh web 服务中断', '正在自动重启…');
     }
     serverReachable = reachable;
-    sendPetState();
     if (reachable) return;
 
     reconnecting = true;
@@ -632,7 +523,6 @@ function startWatchdog() {
         serverReachable = true;
         console.log('[main] dsh web 已自动恢复');
         notify('dsh web 已恢复', '服务已自动重启并重新连接');
-        sendPetState();
       }
     } finally {
       reconnecting = false;
@@ -640,7 +530,7 @@ function startWatchdog() {
   }, WATCHDOG_INTERVAL);
 }
 
-// ---- 任务活动探测：读取主窗口侧栏「进行中」标识（启发式），驱动宠物 busy 状态与完成通知 ----
+// ---- 任务活动探测：读取主窗口侧栏「进行中」标识（启发式），任务结束时弹系统通知 ----
 function startActivityPolling() {
   setInterval(async () => {
     if (!appConnected || !mainWindow || mainWindow.isDestroyed()) return;
@@ -659,13 +549,11 @@ function startActivityPolling() {
 function setTaskRunning(v) {
   if (taskRunning === null) {
     taskRunning = v;
-    sendPetState();
     return;
   }
   if (v === taskRunning) return;
   taskRunning = v;
   if (!v) notify('任务完成', '进行中的会话已结束');
-  sendPetState();
 }
 
 // ---- 桌面端更新检查（未签名包无法用 electron-updater 自动更新：检测新版本 + 跳转下载页）----
@@ -830,7 +718,6 @@ function createWindow() {
         win.loadURL(APP_URL);
         appConnected = true; // 已进入主界面：看门狗/任务探测开始生效
         serverReachable = true;
-        sendPetState();
         checkDshVersion(); // 异步版本检查，不阻塞启动
       }
     })
@@ -980,7 +867,6 @@ async function updateBalance() {
 
   buildTrayMenu();
   applyBalanceWarning();
-  sendPetState();
 }
 
 // 余额低于阈值时在主界面顶部注入红色预警横幅（并同步窗口标题）；恢复后自动移除
@@ -1068,7 +954,6 @@ async function updateStatus() {
   }
   lastStatusAbnormal = abnormal;
   buildTrayMenu();
-  sendPetState();
 }
 
 // 定时刷新托盘展示的余额与服务状态
@@ -1141,12 +1026,6 @@ function buildTrayMenu() {
   }
   items.push(
     { type: 'separator' },
-    {
-      label: '桌面宠物',
-      type: 'checkbox',
-      checked: !!(petWin && !petWin.isDestroyed()),
-      click: togglePet,
-    },
     {
       label: '全局快捷键（⌃⇧D 唤起窗口）',
       type: 'checkbox',
