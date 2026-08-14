@@ -1,7 +1,10 @@
 node_modules/
 dist/
 out/
-build/
+build/*
+# 应用图标由 scripts/gen-icon.swift 生成，但需入库供 GitHub Actions 打包使用
+!build/icon.icns
+!build/icon.png
 *.log
 npm-debug.log*
 .DS_Store

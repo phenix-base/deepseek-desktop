@@ -14,13 +14,16 @@
     "asar": true,
     "files": [
       "main.js",
-      "renderer/**"
+      "preload.js",
+      "renderer/**",
+      "assets/**"
     ],
     "directories": {
       "output": "dist"
     },
     "mac": {
       "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
       "target": [
         "dmg",
         "zip"
