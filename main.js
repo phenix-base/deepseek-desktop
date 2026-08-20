@@ -383,7 +383,8 @@ async function connectToServer(win) {
   // 3) spawn `dsh web` 并等待就绪（同样校验特征串）
   console.log(`[main] ${APP_URL} 未就绪，spawn dsh web`);
   sendStatus(win, '正在启动 dsh web…');
-  const proc = spawn('dsh', ['web'], { detached: false, stdio: 'inherit' });
+  // --no-open：桌面壳自身加载页面，禁止 dsh 再拉起系统浏览器
+  const proc = spawn('dsh', ['web', '--no-open'], { detached: false, stdio: 'inherit' });
   serverProc = proc;
   const spawnError = new Promise((_, reject) => proc.once('error', reject));
   try {
