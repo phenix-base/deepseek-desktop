@@ -18,7 +18,8 @@
       "preload.js",
       "renderer/**",
       "assets/**",
-      "bridge-client.js"
+      "bridge-client.js",
+      "lock-screen.js"
     ],
     "directories": {
       "output": "dist"

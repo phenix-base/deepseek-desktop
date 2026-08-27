@@ -8,6 +8,7 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { BridgeClient } = require('./bridge-client'); // M2：宿主桥客户端（dsh-desktop-bridge 插件）
+const lock = require('./lock-screen'); // M4.5：锁屏模块（密码解锁，托盘/快捷键触发）
 
 const HOST = '127.0.0.1';
 const PORT = 3080;
@@ -161,6 +162,10 @@ if (!gotTheLock) {
     createTray();
     startTrayInfoRefresh(); // 定时刷新托盘展示的余额与服务状态
     initBridge(); // M2：桥接初始化（失败自动回退传统探测模式）
+    lock.initLockScreen({ // M4.5：锁屏初始化（密码解锁；状态变化重建托盘菜单）
+      getMainWindow: () => mainWindow,
+      onStateChange: () => buildTrayMenu(),
+    });
     registerHotkey(); // 全局快捷键唤起窗口
     startWatchdog(); // dsh web 看门狗：挂掉自动重启
     startActivityPolling(); // 任务活动探测（任务完成通知）
@@ -622,6 +627,7 @@ function registerHotkey() {
   if (hotkeyRegistered) return;
   hotkeyRegistered = globalShortcut.register('CmdOrCtrl+Shift+D', toggleMainWindow);
   if (!hotkeyRegistered) console.warn('[main] 全局快捷键注册失败（可能被其他应用占用）');
+  globalShortcut.register('CmdOrCtrl+Shift+L', () => lock.toggleLock()); // M4.5：锁屏快捷键
 }
 
 function toggleHotkey() {
@@ -795,6 +801,8 @@ function loadWindowState() {
 
 // 显示主窗口；隐藏中则恢复，未创建/已销毁则重建
 function showMainWindow() {
+  // M4.5：锁屏期间禁止任何途径唤起主窗口（托盘/深链/快捷键），解锁只能走密码
+  if (lock.isLocked()) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
@@ -1185,6 +1193,11 @@ function createTray() {
 function buildTrayMenu() {
   if (!tray) return;
   const items = [
+    // M4.5：锁屏入口——锁定中禁用（解锁只能输密码，防托盘绕过）
+    lock.isLocked()
+      ? { label: '🔒 已锁定（输入密码解锁）', enabled: false }
+      : { label: '🔒 锁屏', click: () => lock.toggleLock() },
+    { type: 'separator' },
     { label: '打开主窗口', click: showMainWindow },
     { label: '新会话', click: newSession },
     { type: 'separator' },
