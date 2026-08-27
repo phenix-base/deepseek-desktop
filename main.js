@@ -451,32 +451,52 @@ function notify(title, body) {
 
 // ---- M2 桥接：宿主侧一手数据/事件，替代端口探测与 DOM 抓取 ----
 // 桥可用 → 快照/事件驱动；桥不可用 → 全部回退传统探测，桥是纯增量。
+// M3：结束原因文案映射（task.finished 的 reason 值来自宿主 TurnEndReason）
+const TURN_REASON_ZH = {
+  success: '已完成',
+  cancelled: '已取消',
+  canceled: '已取消',
+  error: '异常结束',
+  failed: '失败',
+  aborted: '已中断',
+  'max-tokens': '已达上下文上限',
+};
 
 function getBridge() {
   if (!bridge) bridge = new BridgeClient({ log: (m) => console.log('[bridge]', m) });
   return bridge;
 }
 
-// 把 /state 快照应用到托盘/版本/余额/任务状态（幂等）
+// M3：把 /state 快照应用到版本/余额/任务，任一变化即重建托盘菜单（实时展示）
 function applyBridgeSnapshot(state) {
   if (!state) return;
+  let changed = false;
   if (state.dshVersion) {
     const v = normalizeVersion(state.dshVersion);
     if (v && v !== dshLocalVersion) {
       dshLocalVersion = v;
-      buildTrayMenu();
+      changed = true;
     }
   }
   if (state.balance) {
-    balanceText = state.balance.text || balanceText;
-    balanceValue = state.balance.valueCny !== undefined && state.balance.valueCny !== null
-      ? state.balance.valueCny
-      : balanceValue;
+    const t = state.balance.text;
+    const v = state.balance.valueCny;
+    if (t && t !== balanceText) {
+      balanceText = t;
+      changed = true;
+    }
+    if (v !== undefined && v !== null && v !== balanceValue) {
+      balanceValue = v;
+      changed = true;
+    }
     applyBalanceWarning?.(); // 快照余额可能触发/清除窗口预警
   }
   if (typeof state.runningTasks === 'number') {
-    setTaskRunning(state.runningTasks > 0);
+    const running = state.runningTasks > 0;
+    if (running !== taskRunning) changed = true;
+    setTaskRunning(running); // 内部负责 0→1 反转时的「任务完成」通知去重
   }
+  if (changed) buildTrayMenu(); // 托盘「版本/余额/任务」行实时刷新
 }
 
 // 桥优先探测：桥 /state 成功 → { type:'dsh', state }；失败 → 回退 waitForServer
@@ -505,10 +525,17 @@ function handleBridgeEvent(event, data) {
         console.log('[bridge] 任务开始', data && data.sessionId);
         setTaskRunning(true);
         break;
-      case 'task.finished':
+      case 'task.finished': {
+        // M3：结束原因映射为可读文案；SSE 实时 → 通知延迟从 ≤15s（轮询）降到 ~1s
         console.log('[bridge] 任务结束', data && data.sessionId, data && data.reason);
-        setTaskRunning(false); // setTaskRunning 0→1 反转时弹「任务完成」通知
+        const reason = data && data.reason;
+        const zh = TURN_REASON_ZH[reason] || '';
+        const abnormal = !!reason && reason !== 'success';
+        notify(abnormal ? '任务结束（异常）' : '任务完成', zh ? `会话任务${zh}` : '进行中的会话已结束');
+        taskRunning = false; // 先置位：下面 setTaskRunning 发现无变化，避免重复通知
+        setTaskRunning(false);
         break;
+      }
       case 'session.started':
       case 'session.ended':
         // 会话生命周期：暂只记录（后续托盘可展示活跃会话）
@@ -540,9 +567,10 @@ async function initBridge() {
   console.log(`[bridge] 已接通：桥 ${state.bridgeVersion} · dsh ${state.dshVersion} · 任务 ${state.runningTasks}`);
   getBridge().connectEvents({
     onEvent: (event, data) => handleBridgeEvent(event, data),
-    onDisconnect: () => {
-      bridgeEventsAlive = false;
-      console.log('[bridge] SSE 断开，活动探测回退轮询');
+    // M3：状态翻转驱动模式切换——SSE 通→事件实时；断→15s 轮询快照兜底
+    onStateChange: (alive) => {
+      bridgeEventsAlive = alive;
+      console.log(alive ? '[bridge] SSE 已连通，任务状态实时事件驱动' : '[bridge] SSE 断开，活动探测回退快照轮询');
     },
   });
   bridgeEventsAlive = true;
@@ -1099,10 +1127,12 @@ async function updateStatus() {
   buildTrayMenu();
 }
 
-// 定时刷新托盘展示的余额与服务状态
+// 定时刷新托盘展示的余额与服务状态。
+// M3：桥模式下余额改由 SSE 事件 + 15s 快照实时驱动（applyBridgeSnapshot 重建菜单），
+// 不再走 5 分钟轮询；服务状态页（status.deepseek.com）与桥无关，两种模式都保留。
 function startTrayInfoRefresh() {
   const refresh = () => {
-    updateBalance();
+    if (!bridgeActive) updateBalance(); // 非桥才轮询余额（credentials + 官方接口）
     updateStatus();
   };
   refresh(); // 启动时立即查一次
@@ -1135,6 +1165,8 @@ function buildTrayMenu() {
     { label: '打开主窗口', click: showMainWindow },
     { label: '新会话', click: newSession },
     { type: 'separator' },
+    // M3：任务状态行——桥模式下由 SSE 事件 + 快照实时更新（以前靠 15s DOM 猜测）
+    { label: taskRunning ? '任务：进行中' : '任务：空闲', enabled: false },
     { label: `余额：${balanceText || '查询中…'}`, enabled: false },
     {
       // 直接展示当前服务状态；点击打开状态页查看详情

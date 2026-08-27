@@ -34,6 +34,8 @@ class BridgeClient {
     this._sseReq = null;
     this._retryTimer = null;
     this._onEvent = null;
+    this._onStateChange = null;
+    this._connected = null; // SSE 连接状态（null=未开始 / true|false）
     this._disposed = false;
   }
 
@@ -90,11 +92,26 @@ class BridgeClient {
 
   /**
    * 订阅 SSE /events。断连后指数退避重连（3s → 30s）。
-   * @param onEvent (event, data) 事件回调
+   * @param onEvent       (event, data) 事件回调
+   * @param onStateChange (connected: boolean) 连接状态翻转时回调（M3：SSE 通→事件驱动，断→轮询兜底）
    */
-  connectEvents({ onEvent, minInterval = 3000, maxInterval = 30000 } = {}) {
+  connectEvents({ onEvent, onStateChange, minInterval = 3000, maxInterval = 30000 } = {}) {
     this._onEvent = onEvent;
+    this._onStateChange = onStateChange;
     this._connectEventsLoop(minInterval, maxInterval);
+  }
+
+  /** 连接状态翻转（去重）时通知调用方。 */
+  _setConnected(v) {
+    if (this._connected === v) return;
+    this._connected = v;
+    if (this._onStateChange) {
+      try {
+        this._onStateChange(v);
+      } catch (_) {
+        /* 回调错误不影响事件流 */
+      }
+    }
   }
 
   _connectEventsLoop(min, max) {
@@ -111,10 +128,12 @@ class BridgeClient {
       (res) => {
         if (res.statusCode !== 200) {
           if (this._onEvent) this.log(`events 拒绝（${res.statusCode}），稍后重连`);
+          this._setConnected(false);
           res.resume();
           return this._retry(min * 2, min, max);
         }
         this.eventsConnected = true;
+        this._setConnected(true);
         let buf = '';
         res.on('data', (chunk) => {
           buf += chunk;
@@ -135,17 +154,20 @@ class BridgeClient {
         });
         res.on('end', () => {
           this.eventsConnected = false;
+          this._setConnected(false);
           if (this._onEvent) this.log('events 流断开，重连');
           this._retry(Math.max(min * 2, 5000), min, max);
         });
         res.on('error', () => {
           this.eventsConnected = false;
+          this._setConnected(false);
           this._retry(Math.max(min * 2, 5000), min, max);
         });
       },
     );
     req.on('error', () => {
       this.eventsConnected = false;
+      this._setConnected(false);
       this._retry(Math.max(min * 2, 5000), min, max);
     });
     req.setTimeout(60000, () => {
