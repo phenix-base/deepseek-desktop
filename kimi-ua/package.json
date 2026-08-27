@@ -1,0 +1,29 @@
+{
+  "name": "dsh-kimi-ua",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "dsh host plugin: rewrites the User-Agent of requests to Kimi/Moonshot endpoints as kimi-code-cli/<version>, so Kimi models are called with the kimi-code CLI identity.",
+  "main": "dsh/index.js",
+  "files": [
+    "dsh/index.js",
+    "dsh/cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh/cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "kimi",
+    "moonshot",
+    "user-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phenix-base/deepseek-desktop.git",
+    "directory": "kimi-ua"
+  },
+  "license": "Apache-2.0"
+}

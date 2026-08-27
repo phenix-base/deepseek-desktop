@@ -1,0 +1,11 @@
+# dsh-kimi-ua 的 bundle patch 层。
+#
+# 一行：kimi-ua 宿主插件——patch 全局 fetch，把发往 Kimi/Moonshot 端点的
+# 请求 User-Agent 改写为 kimi-code-cli/<version>。
+#
+# 默认启用；设 DSH_KIMI_UA=0 可禁用。
+
+- insert:
+    - id: kimi-ua
+      name: dsh-kimi-ua
+      disabled: !!js (process.env.DSH_KIMI_UA ?? '') === '0'
