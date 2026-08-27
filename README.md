@@ -22,6 +22,9 @@
 - **托盘新会话**：托盘菜单一键唤出窗口并直接创建新会话。
 - **URL Scheme 深链**：注册 `deepseek-harness://` 协议，`deepseek-harness://session/xxx` 可唤起桌面端并定位到对应路径。
 - **桌面端更新检查**：启动时自动比对 GitHub Releases 最新版本，有新版本时托盘菜单出现下载入口（未签名包无法使用 electron-updater 自动更新，故采用检测 + 跳转下载方式）。
+- **锁屏插件**：托盘「🔒 锁屏」或 `⌘/Ctrl+Shift+L` 锁定——密码哈希存储（scrypt+盐，0600）、连续 5 次错误触发指数冷却（30s→10min）、锁窗为主窗口子窗口只覆盖本应用（不影响其他窗口）、托盘/快捷键/深链解锁全部拦截（唯一通道是密码）。详见[锁屏插件](#锁屏插件)。
+- **宿主桥接插件**：dsh 宿主侧 `dsh-desktop-bridge` 暴露 loopback-only Bearer 鉴权的 `/state` 快照与 `/events` SSE（任务开始/结束、余额预警、心跳），壳端桥优先探测 + 传统模式回退。详见[桥接插件](#桥接插件-dsh-desktop-bridge)。
+- **Kimi User-Agent 插件**：dsh 宿主插件 `dsh-kimi-ua`——使用 Kimi 模型时把请求 `User-Agent` 改写为 `kimi-code-cli/0.38.0`（dsh 归属头强制覆盖 provider 配置，只能运行时拦截）。详见[Kimi UA 插件](#kimi-user-agent-插件-dsh-kimi-ua)。
 
 ## 前置条件
 
@@ -82,11 +85,64 @@ git push origin v0.2.0
 
 > 说明：从 Finder/Dock 启动的 GUI 应用 `PATH` 通常不含 nvm/homebrew 目录，主进程会自动追加这些常见路径以便找到 `dsh` 和 `npm`。
 
+## 锁屏插件
+
+应用内锁屏（`lock-screen.js` + `renderer/lock/`），锁定 DeepSeek Harness 主窗口：
+
+- **触发**：托盘「🔒 锁屏」或快捷键 `⌘/Ctrl+Shift+L`；首次使用时锁窗引导设置密码（两次输入一致后落库并保持锁定）。
+- **解锁唯一通道**：锁窗为主窗口的**子窗口**（`parent: mainWindow`）——只覆盖本应用内容，其他应用窗口完全不受影响；锁定期间托盘「打开主窗口」/快捷键/深链全部被拦截，托盘项变为「🔒 已锁定」禁用态。
+- **安全存储**：密码只存 scrypt+随机盐哈希（`userData/lock-screen.json`，0600，无明文），校验用 `timingSafeEqual`。
+- **防爆破冷却**：连续 5 次错误触发冷却，30s 起指数翻倍（上限 10 分钟），冷却期即使密码正确也拒绝。
+- **UI**：SVG 锁图标 + 毛玻璃卡片 + 入场动画，密码可见性切换，错误时 shake 反馈。
+
+## 桥接插件（dsh-desktop-bridge）
+
+`bridge/` 目录是 dsh 宿主插件（cordis bundle），把宿主状态暴露给桌面壳：
+
+| 端点（loopback-only + Bearer token） | 内容 |
+|---|---|
+| `GET /api/dsh-desktop-bridge/state` | bridgeVersion / dshVersion / 会话列表 / 运行中任务数 / 余额快照 |
+| `GET /api/dsh-desktop-bridge/events` | SSE：`task.started` / `task.finished` / `balance.low` / `heartbeat` |
+
+- Token 存于 `~/.dsh/.desktop-bridge-token`（0600，sha256 + timingSafeEqual 比对）。
+- 壳端 `bridge-client.js` 桥优先：状态探测、任务活动（事件驱动替代 DOM 轮询）、托盘余额、看门狗、版本检查全部先走桥，桥不可用时自动回退传统模式（端口嗅探 + DOM 抓取）。
+- 托盘「安装桥接插件」一键把 bridge 装进 web profile（本地源码 file: 或 npm 包名）。
+
+## Kimi User-Agent 插件（dsh-kimi-ua）
+
+`kimi-ua/` 目录是 dsh 宿主插件：使用 Kimi 模型时把请求 `User-Agent` 改写为 `kimi-code-cli/0.38.0`。
+
+背景：dsh 的 llm 层对每个 provider 请求**强制**发送自己的归属头（`user-agent` 为保留名，provider 配置的 headers 无法覆盖）；而 Kimi 服务端按 UA 识别调用方（[kimi-code](https://github.com/MoonshotAI/kimi-code) CLI 发送 `kimi-code-cli/<version>`）。本插件在宿主进程内 patch 全局 `fetch`，仅对 `kimi.com` / `moonshot.cn` / `moonshot.ai`（含子域）改写 UA，其余请求原样放行。
+
+```bash
+# 安装（本地源码）
+dsh plugin --profile web add /path/to/deepseek-desktop/kimi-ua
+# 重启 dsh 生效
+```
+
+环境变量：`DSH_KIMI_UA=0` 禁用；`DSH_KIMI_UA_VALUE` 覆盖 UA；`DSH_KIMI_UA_HOSTS` 覆盖目标 host 列表。
+
 ## 项目结构
 
 ```
 main.js                       # Electron 主进程（端口检测 / spawn dsh web / 窗口与托盘管理）
 preload.js                    # 通过 contextBridge 暴露 window.dshDesktop（状态与安装日志推送）
+bridge-client.js              # 壳端桥客户端：桥优先探测 + SSE 事件 + 传统模式回退
+lock-screen.js                # 锁屏插件：密码哈希/冷却/锁窗管理（主窗口子窗口）
 renderer/loading.html         # 服务就绪前的加载页（含安装日志可视化）
+renderer/lock/                # 锁屏页面（HTML + preload）
+bridge/                       # dsh 宿主插件 dsh-desktop-bridge（state 快照 + SSE 事件）
+kimi-ua/                      # dsh 宿主插件 dsh-kimi-ua（Kimi 请求 UA 改写）
 .github/workflows/release.yml # 推送 v* tag 时自动构建并发布 dmg/zip 到 Release
 ```
+
+## 版本历史
+
+| 版本 | 里程碑 |
+|---|---|
+| v0.2.4 | 锁窗改为主窗口子窗口（只锁本应用）+ 锁屏页面美化（SVG 图标 / 毛玻璃卡片 / 密码可见性 / shake 动画） |
+| v0.2.3 | 修复：点击「解锁」无反应（submit 成功但未触发 unlock，锁窗不关闭） |
+| v0.2.2 | 锁屏插件初版（密码哈希存储 / 防爆破冷却 / 唯一密码解锁通道） |
+| v0.2.1 | M4：托盘「安装桥接插件」引导 + 桥接就绪状态行 |
+| v0.2.0 | M2：壳端桥接通——桥优先探测 + 传统回退；M3：SSE 事件驱动（任务通知 / 余额预警实时化） |
+| v0.1.x | 基础桌面壳：单实例 / 托盘 / 余额展示 / 看门狗 / 深链 / 自动发布 |
