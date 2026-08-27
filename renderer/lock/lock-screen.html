@@ -5,154 +5,289 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>DeepSeek Harness 已锁定</title>
 <style>
+  :root {
+    --accent: #4d7cff;
+    --accent-dark: #2b4fe0;
+    --bg: #0a0d14;
+    --card-bg: rgba(22, 30, 46, 0.72);
+    --card-border: rgba(120, 160, 255, 0.14);
+    --text: #e8eef7;
+    --text-dim: #7a8aa5;
+    --err: #ff6b6b;
+    --ok: #4ecdc4;
+    --field-bg: rgba(10, 14, 22, 0.6);
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { height: 100%; }
+  html, body { height: 100%; overflow: hidden; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
-    background: radial-gradient(1200px 800px at 50% 30%, #1a2332 0%, #0b0f16 60%, #06080d 100%);
-    color: #e8eef7;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
     display: flex; align-items: center; justify-content: center;
     user-select: none; -webkit-user-select: none;
+    /* 半透明遮罩：隐约看到被锁住的内容但不清晰 */
+    background: rgba(8, 11, 18, 0.86);
+    backdrop-filter: blur(24px) saturate(0.5);
+    -webkit-backdrop-filter: blur(24px) saturate(0.5);
   }
+
+  /* 背景光晕装饰 */
+  body::before {
+    content: ''; position: fixed; top: -20%; left: 50%;
+    transform: translateX(-50%);
+    width: 600px; height: 400px;
+    background: radial-gradient(ellipse, rgba(77, 124, 255, 0.08) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  /* 卡片入场动画 */
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(12px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    20% { transform: translateX(-6px); }
+    40% { transform: translateX(6px); }
+    60% { transform: translateX(-4px); }
+    80% { transform: translateX(4px); }
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
   .card {
-    background: rgba(20, 28, 42, 0.82);
-    border: 1px solid rgba(120, 160, 255, 0.16);
-    border-radius: 16px;
-    padding: 40px 44px;
-    width: 380px;
+    position: relative;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 18px;
+    padding: 44px 40px 36px;
+    width: 420px;
     text-align: center;
-    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
-    backdrop-filter: blur(8px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    animation: cardIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
   }
-  .lock-icon { font-size: 44px; line-height: 1; margin-bottom: 14px; }
-  h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
-  .sub { font-size: 13px; color: #93a5c3; margin-bottom: 24px; }
-  .field {
-    width: 100%; padding: 12px 14px; font-size: 15px;
-    background: #0d1420; color: #e8eef7;
-    border: 1px solid #2a3a54; border-radius: 8px;
-    outline: none; margin-bottom: 10px; text-align: center;
+  .card.shake { animation: shake 0.4s ease; }
+
+  /* SVG 锁图标 */
+  .lock-icon {
+    width: 52px; height: 52px; margin: 0 auto 18px; display: block;
+    opacity: 0.9;
   }
-  .field:focus { border-color: #4d7cff; }
+  .lock-icon .lock-body { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .lock-icon .lock-shackle { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; }
+  .lock-icon .lock-dot { fill: var(--accent); }
+
+  .app-name { font-size: 13px; font-weight: 600; letter-spacing: 0.06em; color: var(--text-dim); margin-bottom: 4px; text-transform: uppercase; }
+  h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.01em; }
+  .sub { font-size: 13px; color: var(--text-dim); margin-bottom: 26px; }
+
+  /* 密码输入区 */
+  .pw-wrap {
+    position: relative; margin-bottom: 14px;
+  }
+  .pw-wrap .pw-field {
+    width: 100%; padding: 13px 44px 13px 16px; font-size: 15px;
+    background: var(--field-bg); color: var(--text);
+    border: 1px solid rgba(120, 160, 255, 0.12); border-radius: 10px;
+    outline: none; text-align: center; letter-spacing: 0.08em;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .pw-wrap .pw-field::placeholder { letter-spacing: 0; color: var(--text-dim); }
+  .pw-wrap .pw-field:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(77, 124, 255, 0.12);
+  }
+  .pw-toggle {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    background: none; border: none; cursor: pointer; padding: 6px;
+    color: var(--text-dim); transition: color 0.2s;
+    display: flex; align-items: center;
+  }
+  .pw-toggle:hover { color: var(--text); }
+  .pw-toggle svg { width: 18px; height: 18px; }
+
+  .pw2-wrap { margin-bottom: 18px; }
+  .pw2-wrap.hidden { display: none; }
+
   .btn {
-    width: 100%; padding: 12px; font-size: 15px; font-weight: 600;
-    background: linear-gradient(180deg, #3b66ff, #2b4fe0);
-    color: #fff; border: none; border-radius: 8px; cursor: pointer;
+    width: 100%; padding: 13px; font-size: 15px; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+    color: #fff; border: none; border-radius: 10px; cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.2s, opacity 0.2s;
+    box-shadow: 0 4px 14px rgba(77, 124, 255, 0.25);
   }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .err { margin-top: 14px; font-size: 13px; min-height: 18px; color: #ff7a7a; }
-  .err.ok { color: #6fd48a; }
-  .hint { margin-top: 16px; font-size: 12px; color: #62748f; }
-  .hint code { color: #8ba8e0; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(77, 124, 255, 0.35); }
+  .btn:active { transform: translateY(0) scale(0.99); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+
+  .status {
+    margin-top: 16px; font-size: 13px; min-height: 20px;
+    color: var(--err); opacity: 0; transition: opacity 0.2s;
+  }
+  .status.visible { opacity: 1; animation: fadeIn 0.2s; }
+  .status.ok { color: var(--ok); }
+
+  .footer {
+    margin-top: 20px; padding-top: 16px;
+    border-top: 1px solid rgba(120, 160, 255, 0.08);
+    font-size: 11px; color: var(--text-dim); line-height: 1.6;
+  }
+  .footer kbd {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    background: rgba(120, 160, 255, 0.1); border: 1px solid rgba(120, 160, 255, 0.1);
+    font-family: inherit; font-size: 10px; color: var(--text);
+  }
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="lock-icon">🔒</div>
-  <h1 id="title">DeepSeek Harness 已锁定</h1>
-  <div class="sub" id="sub">请输入密码解锁</div>
+<div class="card" id="card">
+  <svg class="lock-icon" viewBox="0 0 48 48" fill="none">
+    <path class="lock-shackle" d="M16 22V16a8 8 0 0 1 16 0v6" />
+    <rect class="lock-body" x="12" y="22" width="24" height="18" rx="3" />
+    <circle class="lock-dot" cx="24" cy="29" r="2" />
+    <rect class="lock-dot" x="22.5" y="31" width="3" height="5" rx="1.5" />
+  </svg>
 
-  <input class="field" id="pw" type="password" placeholder="密码" autocomplete="off" spellcheck="false" autofocus>
-  <input class="field" id="pw2" type="password" placeholder="再次输入密码" autocomplete="off" spellcheck="false" style="display:none">
+  <div class="app-name">DeepSeek Harness</div>
+  <h1 id="title">已锁定</h1>
+  <div class="sub" id="sub">输入密码以解锁</div>
+
+  <div class="pw-wrap">
+    <input class="pw-field" id="pw" type="password" placeholder="密码" autocomplete="off" spellcheck="false" autofocus>
+    <button class="pw-toggle" id="togglePw" type="button" title="显示/隐藏密码">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+      </svg>
+    </button>
+  </div>
+  <div class="pw-wrap pw2-wrap hidden" id="pw2Wrap">
+    <input class="pw-field" id="pw2" type="password" placeholder="再次输入密码" autocomplete="off" spellcheck="false">
+  </div>
 
   <button class="btn" id="go">解锁</button>
-  <div class="err" id="err"></div>
-  <div class="hint">快捷键 <code>Ctrl/⌘ + Shift + L</code> 触发锁定 · 忘记密码只能重置应用</div>
+  <div class="status" id="status"></div>
+
+  <div class="footer">
+    <kbd>⌘/Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>L</kbd> 触发锁定<br>
+  </div>
 </div>
 
 <script>
 (function () {
   "use strict";
   var api = window.lockScreen;
-  var mode = "locked"; // 由 lock:mode 决定
+  var mode = "locked";
   var busy = false;
 
+  var card = document.getElementById("card");
   var el = {
     title: document.getElementById("title"),
     sub: document.getElementById("sub"),
     pw: document.getElementById("pw"),
     pw2: document.getElementById("pw2"),
+    pw2Wrap: document.getElementById("pw2Wrap"),
     go: document.getElementById("go"),
-    err: document.getElementById("err"),
+    status: document.getElementById("status"),
+    togglePw: document.getElementById("togglePw"),
   };
 
-  function setErr(text) {
-    el.err.textContent = text;
-    el.err.classList.toggle("ok", false);
+  function showStatus(text, isOk) {
+    el.status.textContent = text;
+    el.status.classList.add("visible");
+    el.status.classList.toggle("ok", !!isOk);
   }
-  function setOk(text) {
-    el.err.textContent = text;
-    el.err.classList.toggle("ok", true);
+  function clearStatus() {
+    el.status.classList.remove("visible");
+    el.status.textContent = "";
+  }
+  function shake() {
+    card.classList.remove("shake");
+    void card.offsetWidth; // 触发 reflow 以重启动画
+    card.classList.add("shake");
   }
 
   function showSetupUI() {
     mode = "setup";
     el.title.textContent = "设置锁屏密码";
-    el.sub.textContent = "首次使用：设置解锁密码后立即锁定";
+    el.sub.textContent = "首次使用，设置后立即锁定";
     el.pw.placeholder = "设置密码（至少 4 位）";
-    el.pw2.style.display = "block";
+    el.pw2Wrap.classList.remove("hidden");
     el.go.textContent = "设置并锁定";
+    clearStatus();
   }
 
   function showLockedUI() {
     mode = "locked";
-    el.title.textContent = "DeepSeek Harness 已锁定";
-    el.sub.textContent = "请输入密码解锁";
+    el.title.textContent = "已锁定";
+    el.sub.textContent = "输入密码以解锁";
     el.pw.placeholder = "密码";
-    el.pw2.style.display = "none";
+    el.pw2Wrap.classList.add("hidden");
     el.pw2.value = "";
     el.go.textContent = "解锁";
+    clearStatus();
   }
 
+  // 密码显示/隐藏切换
+  el.togglePw.addEventListener("click", function () {
+    var isPw = el.pw.type === "password";
+    el.pw.type = isPw ? "text" : "password";
+    el.pw2.type = isPw ? "text" : "password";
+    el.togglePw.style.color = isPw ? "var(--accent)" : "";
+    el.pw.focus();
+  });
+
   async function start() {
-    api.mode().then(function (m) {
+    try {
+      var m = await api.mode();
       if (m && m.mode === "setup") showSetupUI();
       else showLockedUI();
-      el.pw.focus();
-    }).catch(function () { showLockedUI(); });
+    } catch (_) { showLockedUI(); }
+    el.pw.focus();
   }
 
   async function onGo() {
-    if (!api) { setErr("锁屏接口未加载（preload 异常，请重启应用）"); return; }
+    if (!api) { showStatus("锁屏接口未加载，请重启应用"); return; }
     if (busy) return;
     busy = true;
     el.go.disabled = true;
+    clearStatus();
+
     try {
       if (mode === "setup") {
         var p1 = el.pw.value;
         var p2 = el.pw2.value;
-        if (p1.length < 4) { setErr("密码至少 4 位"); return; }
-        if (p1 !== p2) { setErr("两次输入不一致"); el.pw.select(); return; }
+        if (p1.length < 4) { showStatus("密码至少 4 位"); shake(); return; }
+        if (p1 !== p2) { showStatus("两次输入不一致"); shake(); el.pw.select(); return; }
         var r = await api.set(p1);
         if (r && r.ok) {
-          setOk("密码已设置，已锁定");
           el.pw.value = "";
           el.pw2.value = "";
           showLockedUI();
-        } else if (r && r.reason === "too-short") {
-          setErr("密码至少 4 位");
+          showStatus("密码已设置", true);
         } else {
-          setErr("设置失败，请重试");
+          showStatus("设置失败，请重试");
         }
         return;
       }
 
-      // locked 模式：提交解锁
       var res = await api.submit(el.pw.value);
-      if (!res) { setErr("解锁接口错误"); return; }
+      if (!res) { showStatus("解锁接口错误"); return; }
       if (res.ok) {
-        // 解锁成功：主进程 setImmediate(unlock) 销毁锁窗并恢复主窗口
+        // 主进程 setImmediate(unlock) 销毁锁窗
+        showStatus("解锁成功", true);
         return;
       }
       if (res.reason === "cooldown") {
-        setErr("尝试过多，请 " + res.remainingSec + " 秒后再试");
+        showStatus("尝试过多，请 " + res.remainingSec + " 秒后再试");
       } else {
         var left = res.failsLeft;
-        setErr("密码错误" + (left ? "，还可尝试 " + left + " 次" : ""));
+        showStatus("密码错误" + (left ? " · 剩余 " + left + " 次" : ""));
       }
+      shake();
       el.pw.value = "";
     } catch (e) {
-      setErr("解锁异常：" + (e && e.message ? e.message : String(e)));
+      showStatus("异常：" + (e && e.message ? e.message : String(e)));
     } finally {
       busy = false;
       el.go.disabled = false;
@@ -161,12 +296,8 @@
   }
 
   el.go.addEventListener("click", onGo);
-  el.pw.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { e.preventDefault(); onGo(); }
-  });
-  el.pw2.addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { e.preventDefault(); onGo(); }
-  });
+  el.pw.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); onGo(); } });
+  el.pw2.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); onGo(); } });
 
   start();
 })();

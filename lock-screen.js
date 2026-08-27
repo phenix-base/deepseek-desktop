@@ -107,22 +107,23 @@ function submit(pw) {
 const LOCK_HTML = () => path.join(__dirname, 'renderer', 'lock', 'lock-screen.html');
 const LOCK_PRELOAD = () => path.join(__dirname, 'renderer', 'lock', 'preload.js');
 
-function createLockWindow() {
-  const { BrowserWindow, screen: scr } = electron();
-  const wa = scr.getPrimaryDisplay().workArea;
+function createLockWindow(parent) {
+  const { BrowserWindow } = electron();
+  const bounds = parent ? parent.getBounds() : { x: 0, y: 0, width: 800, height: 600 };
   const win = new BrowserWindow({
-    x: wa.x,
-    y: wa.y,
-    width: wa.width,
-    height: wa.height,
+    parent: parent || undefined, // 子窗口：始终在主窗口上方，不影响其他应用
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: bounds.height,
     frame: false,
     resizable: false,
     movable: false,
     minimizable: false,
     maximizable: false,
     skipTaskbar: true,
-    alwaysOnTop: true,
     show: false,
+    // 不设置 alwaysOnTop —— 子窗口天然在 parent 之上，不会盖住其他应用
     webPreferences: {
       preload: LOCK_PRELOAD(),
       contextIsolation: true,
@@ -130,10 +131,8 @@ function createLockWindow() {
       sandbox: true,
     },
   });
-  win.setAlwaysOnTop(true, 'screen-saver'); // 最高层遮罩
   win.setMenuBarVisibility(false);
   win.on('close', (e) => {
-    // 锁定时禁止关闭（防绕过露出窗口）；应用退出流程放行
     if (locked && !quitting) e.preventDefault();
   });
   win.on('closed', () => {
@@ -143,8 +142,34 @@ function createLockWindow() {
   return win;
 }
 
-function ensureLockWindow() {
-  if (!lockWindow || lockWindow.isDestroyed()) lockWindow = createLockWindow();
+// 主窗口移动/缩放时同步锁窗 bounds（保持完全覆盖）
+let boundSyncListeners = null;
+function bindBoundsSync(parent, child) {
+  if (!parent || !child) return;
+  const sync = () => {
+    if (child.isDestroyed() || parent.isDestroyed()) return;
+    child.setBounds(parent.getContentBounds());
+  };
+  parent.on('resize', sync);
+  parent.on('move', sync);
+  // 锁定时禁止主窗口最小化（最小化会导致锁窗露出下层内容）
+  const preventMin = (e) => { if (locked) e.preventDefault(); };
+  parent.on('minimize', preventMin);
+  boundSyncListeners = { sync, preventMin, parent };
+}
+function unbindBoundsSync() {
+  if (!boundSyncListeners) return;
+  const { sync, preventMin, parent } = boundSyncListeners;
+  try {
+    parent.removeListener('resize', sync);
+    parent.removeListener('move', sync);
+    parent.removeListener('minimize', preventMin);
+  } catch (_) {}
+  boundSyncListeners = null;
+}
+
+function ensureLockWindow(parent) {
+  if (!lockWindow || lockWindow.isDestroyed()) lockWindow = createLockWindow(parent);
   return lockWindow;
 }
 
@@ -154,29 +179,37 @@ function isLocked() {
   return locked;
 }
 
-/** 锁定：隐藏主窗口（内容不可见）+ 弹全屏锁窗。未设密码时锁窗进入设置模式。 */
+/** 锁定：用子窗口覆盖主窗口（主窗口保持可见但被锁窗盖住，不影响其他应用）。 */
 function lock() {
   if (locked) return;
   loadStore();
   const main = getMainWindow();
-  if (main && !main.isDestroyed()) main.hide();
   locked = true;
-  const win = ensureLockWindow();
-  win.show();
+  const win = ensureLockWindow(main);
+  if (main && !main.isDestroyed()) {
+    // 锁窗覆盖主窗口内容区，跟随移动/缩放
+    win.setBounds(main.getContentBounds());
+    bindBoundsSync(main, win);
+  }
+  win.showInactive(); // 不抢焦点到锁窗本身——焦点在锁窗内的输入框（页面 autofocus）
   win.focus();
   onStateChange();
 }
 
-/** 解锁（仅校验成功路径调用）：销毁锁窗 + 恢复主窗口。 */
+/** 解锁（仅校验成功路径调用）：销毁锁窗 + 恢复主窗口焦点。 */
 function unlock() {
   if (!locked) return;
   locked = false;
   failures = 0;
   cooldownUntil = 0;
+  unbindBoundsSync();
   if (lockWindow && !lockWindow.isDestroyed()) lockWindow.destroy();
   lockWindow = null;
   const main = getMainWindow();
-  if (main && !main.isDestroyed()) main.show();
+  if (main && !main.isDestroyed()) {
+    if (main.isMinimized()) main.restore();
+    main.focus();
+  }
   onStateChange();
 }
 
