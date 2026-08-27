@@ -113,49 +113,51 @@
   }
 
   async function onGo() {
+    if (!api) { setErr("锁屏接口未加载（preload 异常，请重启应用）"); return; }
     if (busy) return;
     busy = true;
     el.go.disabled = true;
-
-    if (mode === "setup") {
-      var p1 = el.pw.value;
-      var p2 = el.pw2.value;
-      if (p1.length < 4) { setErr("密码至少 4 位"); busy = false; el.go.disabled = false; el.pw.focus(); return; }
-      if (p1 !== p2) { setErr("两次输入不一致"); busy = false; el.go.disabled = false; el.pw.focus(); el.pw.select(); return; }
-      var r = await api.set(p1);
-      if (r && r.ok) {
-        setOk("密码已设置，已锁定");
-        el.pw.value = "";
-        el.pw2.value = "";
-        showLockedUI();
-      } else if (r && r.reason === "too-short") {
-        setErr("密码至少 4 位");
-      } else {
-        setErr("设置失败，请重试");
+    try {
+      if (mode === "setup") {
+        var p1 = el.pw.value;
+        var p2 = el.pw2.value;
+        if (p1.length < 4) { setErr("密码至少 4 位"); return; }
+        if (p1 !== p2) { setErr("两次输入不一致"); el.pw.select(); return; }
+        var r = await api.set(p1);
+        if (r && r.ok) {
+          setOk("密码已设置，已锁定");
+          el.pw.value = "";
+          el.pw2.value = "";
+          showLockedUI();
+        } else if (r && r.reason === "too-short") {
+          setErr("密码至少 4 位");
+        } else {
+          setErr("设置失败，请重试");
+        }
+        return;
       }
+
+      // locked 模式：提交解锁
+      var res = await api.submit(el.pw.value);
+      if (!res) { setErr("解锁接口错误"); return; }
+      if (res.ok) {
+        // 解锁成功：主进程 setImmediate(unlock) 销毁锁窗并恢复主窗口
+        return;
+      }
+      if (res.reason === "cooldown") {
+        setErr("尝试过多，请 " + res.remainingSec + " 秒后再试");
+      } else {
+        var left = res.failsLeft;
+        setErr("密码错误" + (left ? "，还可尝试 " + left + " 次" : ""));
+      }
+      el.pw.value = "";
+    } catch (e) {
+      setErr("解锁异常：" + (e && e.message ? e.message : String(e)));
+    } finally {
       busy = false;
       el.go.disabled = false;
       el.pw.focus();
-      return;
     }
-
-    // locked 模式：提交解锁
-    var res = await api.submit(el.pw.value);
-    if (!res) { setErr("解锁接口错误"); busy = false; el.go.disabled = false; return; }
-    if (res.ok) {
-      // 解锁成功：由主进程销毁锁窗并恢复主窗口，这里无需再操作
-      return;
-    }
-    if (res.reason === "cooldown") {
-      setErr("尝试过多，请 " + res.remainingSec + " 秒后再试");
-    } else {
-      var left = res.failsLeft;
-      setErr("密码错误" + (left ? "，还可尝试 " + left + " 次" : ""));
-    }
-    el.pw.value = "";
-    busy = false;
-    el.go.disabled = false;
-    el.pw.focus();
   }
 
   el.go.addEventListener("click", onGo);

@@ -207,7 +207,12 @@ function initLockScreen({ onStateChange: osc = () => {}, getMainWindow: gmw = ()
   });
 
   ipcMain.handle('lock:mode', () => ({ mode: store ? 'locked' : 'setup' }));
-  ipcMain.handle('lock:submit', (_e, pw) => submit(pw));
+  ipcMain.handle('lock:submit', (_e, pw) => {
+    const result = submit(pw);
+    // 解锁成功：异步触发 unlock（setImmediate 让 IPC 响应先返回，再销毁发送方窗口）
+    if (result.ok) setImmediate(() => unlock());
+    return result;
+  });
   ipcMain.handle('lock:set', (_e, pw) => {
     if (store) return { ok: false };
     const s = String(pw);
