@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const { BridgeClient } = require('./bridge-client'); // M2：宿主桥客户端（dsh-desktop-bridge 插件）
 
 const HOST = '127.0.0.1';
 const PORT = 3080;
@@ -54,6 +55,12 @@ let lastStatusAbnormal = null; // 上次服务状态是否异常（通知去重�
 let updateInfo = null; // 桌面端新版本信息 { latest, url }
 let lastRendererCrash = 0; // 上次渲染进程崩溃时间
 let rendererCrashCount = 0; // 短时间内的连续崩溃次数
+
+// ---- M2：宿主桥（dsh-desktop-bridge）状态 ----
+let bridge = null; // BridgeClient 实例（惰性创建）
+let bridgeActive = false; // 最近一次桥探测成功
+let bridgeState = null; // 最近一次 /state 快照
+let bridgeEventsAlive = false; // SSE 事件流已连接
 
 // 从 Finder/Dock 启动时 PATH 通常不含 dsh/npm，追加常见安装位置（homebrew、nvm）
 function augmentPath() {
@@ -153,6 +160,7 @@ if (!gotTheLock) {
     if (!START_HIDDEN) createWindow(); // --hidden：只驻托盘（配合开机自启）
     createTray();
     startTrayInfoRefresh(); // 定时刷新托盘展示的余额与服务状态
+    initBridge(); // M2：桥接初始化（失败自动回退传统探测模式）
     registerHotkey(); // 全局快捷键唤起窗口
     startWatchdog(); // dsh web 看门狗：挂掉自动重启
     startActivityPolling(); // 任务活动探测（任务完成通知）
@@ -213,7 +221,8 @@ function waitForServer(port = PORT, host = HOST, timeout = 30000, interval = 500
 async function waitDshWeb(timeout = 30000, interval = 500) {
   const deadline = Date.now() + timeout;
   for (;;) {
-    const probe = await waitForServer(PORT, HOST, Math.max(deadline - Date.now(), 100), interval);
+    // M2：桥优先——/state 200 即证明 3080 上是 dsh web；桥不可用回退特征串
+    const probe = await probeDshWeb(Math.max(deadline - Date.now(), 1500), interval);
     if (probe && probe.type === 'dsh') return true;
     if (probe && probe.type === 'other') {
       throw new Error(`端口 ${PORT} 被其他程序占用，请释放后重试`);
@@ -411,7 +420,7 @@ async function terminateDsh() {
     }
   }
   const spawnedPid = serverProc ? serverProc.pid : -1;
-  const probe = await waitForServer(PORT, HOST, 1500);
+  const probe = await probeDshWeb(1500);
   if (!probe || probe.type !== 'dsh') return; // 3080 上已不是 dsh web（或已退出），不动它
   try {
     const r = spawnSync('lsof', ['-nP', `-iTCP:${PORT}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8' });
@@ -438,6 +447,105 @@ function notify(title, body) {
   } catch (_) {
     /* 通知失败不影响主流程 */
   }
+}
+
+// ---- M2 桥接：宿主侧一手数据/事件，替代端口探测与 DOM 抓取 ----
+// 桥可用 → 快照/事件驱动；桥不可用 → 全部回退传统探测，桥是纯增量。
+
+function getBridge() {
+  if (!bridge) bridge = new BridgeClient({ log: (m) => console.log('[bridge]', m) });
+  return bridge;
+}
+
+// 把 /state 快照应用到托盘/版本/余额/任务状态（幂等）
+function applyBridgeSnapshot(state) {
+  if (!state) return;
+  if (state.dshVersion) {
+    const v = normalizeVersion(state.dshVersion);
+    if (v && v !== dshLocalVersion) {
+      dshLocalVersion = v;
+      buildTrayMenu();
+    }
+  }
+  if (state.balance) {
+    balanceText = state.balance.text || balanceText;
+    balanceValue = state.balance.valueCny !== undefined && state.balance.valueCny !== null
+      ? state.balance.valueCny
+      : balanceValue;
+    applyBalanceWarning?.(); // 快照余额可能触发/清除窗口预警
+  }
+  if (typeof state.runningTasks === 'number') {
+    setTaskRunning(state.runningTasks > 0);
+  }
+}
+
+// 桥优先探测：桥 /state 成功 → { type:'dsh', state }；失败 → 回退 waitForServer
+async function probeDshWeb(timeout = 3000, interval = 500) {
+  if (bridgeActive) {
+    const state = await getBridge().probeState(Math.max(timeout / 2, 1500));
+    if (state) {
+      bridgeState = state;
+      applyBridgeSnapshot(state);
+      return { type: 'dsh', state };
+    }
+  }
+  const probe = await waitForServer(PORT, HOST, timeout, interval);
+  return probe; // { type:'dsh'|'other' } 或 null
+}
+
+// 桥事件路由：任务/会话/余额低 事件 → 通知 + 状态
+function handleBridgeEvent(event, data) {
+  try {
+    switch (event) {
+      case 'hello':
+        bridgeState = data;
+        applyBridgeSnapshot(data);
+        break;
+      case 'task.started':
+        console.log('[bridge] 任务开始', data && data.sessionId);
+        setTaskRunning(true);
+        break;
+      case 'task.finished':
+        console.log('[bridge] 任务结束', data && data.sessionId, data && data.reason);
+        setTaskRunning(false); // setTaskRunning 0→1 反转时弹「任务完成」通知
+        break;
+      case 'session.started':
+      case 'session.ended':
+        // 会话生命周期：暂只记录（后续托盘可展示活跃会话）
+        console.log('[bridge]', event, data && data.sessionId);
+        break;
+      case 'balance.low':
+        notify('账户余额不足', `剩余 ¥${Number(data && data.valueCny).toFixed(2)}，请及时充值`);
+        break;
+      case 'heartbeat':
+        break;
+      default:
+        console.log('[bridge] 未识别事件', event, data);
+    }
+  } catch (_) {
+    /* 事件处理失败不影响桥 */
+  }
+}
+
+// 初始化桥：探测 /state，成功则订阅 SSE 事件；失败静默回退（不打断启动）
+async function initBridge() {
+  const state = await getBridge().probeState(3000);
+  if (!state) {
+    console.log('[bridge] 未发现 dsh-desktop-bridge（未装插件或未重启生效），使用传统探测模式');
+    return;
+  }
+  bridgeActive = true;
+  bridgeState = state;
+  applyBridgeSnapshot(state);
+  console.log(`[bridge] 已接通：桥 ${state.bridgeVersion} · dsh ${state.dshVersion} · 任务 ${state.runningTasks}`);
+  getBridge().connectEvents({
+    onEvent: (event, data) => handleBridgeEvent(event, data),
+    onDisconnect: () => {
+      bridgeEventsAlive = false;
+      console.log('[bridge] SSE 断开，活动探测回退轮询');
+    },
+  });
+  bridgeEventsAlive = true;
 }
 
 // ---- URL Scheme 深链：deepseek-harness://session/xxx → 主界面定位 ----
@@ -494,7 +602,7 @@ function newSession() {
 function startWatchdog() {
   setInterval(async () => {
     if (!appConnected || isQuitting || dshTerminated || reconnecting) return;
-    const probe = await waitForServer(PORT, HOST, 3000);
+    const probe = await probeDshWeb(3000);
     const reachable = !!probe && probe.type === 'dsh';
     if (serverReachable === true && !reachable) {
       console.warn('[main] dsh web 失去响应，尝试自动重启');
@@ -536,6 +644,16 @@ function startActivityPolling() {
   setInterval(async () => {
     if (!appConnected || !mainWindow || mainWindow.isDestroyed()) return;
     if (!mainWindow.webContents.getURL().startsWith(APP_URL)) return;
+    if (bridgeActive) {
+      // M2 桥模式：/state 的 runningTasks 是宿主一手判定，不再抓 DOM
+      const state = await getBridge().probeState(1500);
+      if (state) {
+        bridgeState = state;
+        applyBridgeSnapshot(state);
+        return;
+      }
+      // 桥临时不可达 → 落回 DOM 启发式（传统模式）
+    }
     try {
       const running = await mainWindow.webContents.executeJavaScript(
         `document.body.innerText.includes('进行中') || document.body.innerText.includes('In progress')`
@@ -769,6 +887,14 @@ function npmViewLatestVersion() {
 
 // 异步检查 dsh 版本：本地 vs npm 最新，不一致时托盘菜单出现升级项；失败静默忽略
 async function checkDshVersion() {
+  if (bridgeActive && bridgeState && bridgeState.dshVersion) {
+    // M2 桥模式：本地版本走宿主一手数据；最新版仍查 npm（升级入口需要）
+    dshLocalVersion = normalizeVersion(bridgeState.dshVersion);
+    dshLatestVersion = await npmViewLatestVersion();
+    console.log(`[main] dsh 版本（桥）：本地 ${dshLocalVersion}，最新 ${dshLatestVersion || '未知'}`);
+    buildTrayMenu();
+    return;
+  }
   const local = await queryDshVersion();
   if (!local) return; // dsh 不可用，跳过
   dshLocalVersion = local;
@@ -841,22 +967,30 @@ function fetchBalance(apiKey) {
 
 // 静默查询余额并更新托盘菜单（成功显示金额，失败显示原因）
 async function updateBalance() {
-  const apiKey = readApiKey();
-  if (!apiKey) {
-    balanceText = '未配置 API Key';
-    buildTrayMenu();
-    return;
+  if (bridgeActive && bridgeState && bridgeState.balance) {
+    // M2 桥模式：宿主侧已聚合（credentials + 官方接口 + 缓存），直接取快照
+    const b = bridgeState.balance;
+    balanceText = b.text || balanceText;
+    balanceValue = b.valueCny !== undefined && b.valueCny !== null ? b.valueCny : balanceValue;
+    console.log('[main] 余额（桥）：', balanceText);
+  } else {
+    const apiKey = readApiKey();
+    if (!apiKey) {
+      balanceText = '未配置 API Key';
+      buildTrayMenu();
+      return;
+    }
+    try {
+      const data = await fetchBalance(apiKey);
+      const infos = data.balance_infos || [];
+      const cny = infos.find((i) => i.currency === 'CNY') || infos[0];
+      balanceValue = cny ? parseFloat(cny.total_balance) : null;
+      balanceText = infos.map((i) => `${i.total_balance} ${i.currency}`).join(' / ') || '未知';
+    } catch (err) {
+      balanceText = `查询失败（${err.message.slice(0, 30)}）`;
+    }
+    console.log('[main] 余额：', balanceText);
   }
-  try {
-    const data = await fetchBalance(apiKey);
-    const infos = data.balance_infos || [];
-    const cny = infos.find((i) => i.currency === 'CNY') || infos[0];
-    balanceValue = cny ? parseFloat(cny.total_balance) : null;
-    balanceText = infos.map((i) => `${i.total_balance} ${i.currency}`).join(' / ') || '未知';
-  } catch (err) {
-    balanceText = `查询失败（${err.message.slice(0, 30)}）`;
-  }
-  console.log('[main] 余额：', balanceText);
 
   // 余额不足的状态变化联动：系统通知 + Dock 弹跳（仅"正常→不足"切换时触发一次）
   const low = balanceValue !== null && balanceValue < BALANCE_WARN_THRESHOLD;
