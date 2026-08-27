@@ -1,0 +1,11 @@
+# dsh-desktop-bridge 的 bundle patch 层。
+#
+# 一行：desktop-bridge 宿主插件，挂载 loopback-only 的
+# /api/dsh-desktop-bridge/state 与 /api/dsh-desktop-bridge/events（SSE）。
+#
+# 默认启用；设 DSH_DESKTOP_BRIDGE=0 可禁用（例如纯服务器部署不需要桌面桥时）。
+
+- insert:
+    - id: desktop-bridge
+      name: dsh-desktop-bridge
+      disabled: !!js (process.env.DSH_DESKTOP_BRIDGE ?? '') === '0'

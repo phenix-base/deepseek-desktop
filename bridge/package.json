@@ -1,0 +1,28 @@
+{
+  "name": "dsh-desktop-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Desktop bridge for the deepseek-desktop shell: exposes dsh host state and task events to the local Electron app over loopback-only, token-authenticated HTTP/SSE.",
+  "main": "dsh/index.js",
+  "files": [
+    "dsh/index.js",
+    "dsh/cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh/cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "desktop",
+    "electron"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phenix-base/deepseek-desktop.git",
+    "directory": "bridge"
+  },
+  "license": "Apache-2.0"
+}
