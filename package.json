@@ -1,6 +1,6 @@
 {
   "name": "deepseek-desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Electron desktop shell for dsh web (http://127.0.0.1:3080/)",
   "author": "xiaobin <xiaobin@jbinfo.cn>",
   "repository": "https://github.com/phenix-base/deepseek-desktop",
@@ -17,7 +17,8 @@
       "main.js",
       "preload.js",
       "renderer/**",
-      "assets/**"
+      "assets/**",
+      "bridge-client.js"
     ],
     "directories": {
       "output": "dist"

@@ -554,6 +554,29 @@ function handleBridgeEvent(event, data) {
   }
 }
 
+// 安装引导（M4）：开发树存在桥包 → file: 本地源即装即验；否则用 npm 包名（发布后）
+function installBridgePlugin() {
+  const target = fs.existsSync(path.join(__dirname, 'bridge', 'package.json'))
+    ? path.join(__dirname, 'bridge') // 开发态：本地 file: 源（不等 npm 发布）
+    : 'dsh-desktop-bridge'; // 发布态：npm 源
+  console.log(`[main] 安装桥接插件：dsh plugin --profile web add ${target}`);
+  notify('安装桥接插件', '正在执行 dsh plugin add…（需 dsh CLI 可用）');
+  const child = spawn('dsh', ['plugin', '--profile', 'web', 'add', target], {
+    stdio: 'ignore',
+  });
+  child.on('error', (err) => {
+    console.error('[main] 桥安装失败（spawn）:', err.message);
+    notify('桥接插件安装失败', `无法启动 dsh CLI：${err.message.slice(0, 40)}`);
+  });
+  child.on('exit', (code) => {
+    if (code === 0) {
+      notify('桥接插件已安装', '请完全退出并重新打开本应用，桥即生效（任务通知转实时）');
+    } else {
+      notify('桥接插件安装失败', `dsh 退出码 ${code}，日志见主日志文件`);
+    }
+  });
+}
+
 // 初始化桥：探测 /state，成功则订阅 SSE 事件；失败静默回退（不打断启动）
 async function initBridge() {
   const state = await getBridge().probeState(3000);
@@ -1167,6 +1190,10 @@ function buildTrayMenu() {
     { type: 'separator' },
     // M3：任务状态行——桥模式下由 SSE 事件 + 快照实时更新（以前靠 15s DOM 猜测）
     { label: taskRunning ? '任务：进行中' : '任务：空闲', enabled: false },
+    // M4：桥状态/安装引导——桥激活显示状态；未激活提供一键安装（实时任务通知的开关）
+    ...(bridgeActive
+      ? [{ label: bridgeEventsAlive ? '桥接：实时模式已启用' : '桥接：轮询兜底（SSE 断）', enabled: false }]
+      : [{ label: '安装桥接插件（实时任务通知）', click: installBridgePlugin }]),
     { label: `余额：${balanceText || '查询中…'}`, enabled: false },
     {
       // 直接展示当前服务状态；点击打开状态页查看详情
